@@ -1,110 +1,335 @@
+
 import os
 import json
 import base64
+import mimetypes
+
+import streamlit as st
 from openai import OpenAI
 
-
-def get_api_key():
-    try:
-        import streamlit as st
-        return st.secrets.get("OPENAI_API_KEY", "")
-    except Exception:
-        return os.getenv("OPENAI_API_KEY", "")
+from csv_analyzer import (
+    build_csv_ai_summary,
+    get_csv_text_for_ai
+)
 
 
-def get_model():
-    try:
-        import streamlit as st
-        return st.secrets.get(
-            "OPENAI_MODEL",
-            "gpt-5.5"
-        )
-    except Exception:
-        return os.getenv("OPENAI_MODEL", "gpt-5.5")
-
-
-def get_client():
-    api_key = get_api_key()
-
-    if not api_key:
-        raise ValueError(
-            "OpenAI API key is missing. Configure it in Streamlit Secrets."
-        )
-
-    return OpenAI(api_key=api_key)
-
+# --------------------------------------------------
+# 1. AI SYSTEM INSTRUCTIONS
+# --------------------------------------------------
 
 SYSTEM_INSTRUCTIONS = """
-You are Doctor Car AI, an automotive diagnostic assistant
-supporting professional vehicle inspectors.
+You are Doctor Car's professional automotive diagnostic assistant.
 
-Your job is to analyze vehicle complaints using actual evidence.
+Your role is to support trained vehicle inspectors
+during pre-purchase vehicle inspections.
 
-STRICT RULES:
+STRICT DIAGNOSTIC RULES:
 
-1. Never invent vehicle data, DTC codes, sensor readings or test results.
-2. Never treat missing parameters as zero.
-3. Never assume all vehicles support all OBD parameters.
-4. Distinguish confirmed faults from suspected and possible faults.
-5. A DTC alone does not prove that a component is defective.
-6. Do not recommend replacing a component without supporting evidence.
-7. If evidence is insufficient, say further diagnosis is required.
-8. Explain why each next test is required.
-9. Give expected readings only when vehicle-specific specifications
-   are available. Otherwise clearly label them as general guidance.
-10. Consider engine, transmission and other related modules together.
-11. Check whether a complaint may be caused by another system.
-12. Do not claim 100% diagnostic accuracy.
-13. Identify safety-critical concerns clearly.
-14. Never fabricate OEM specifications.
-15. Missing data must be reported as unavailable, not normal.
+1. Never invent DTC codes or descriptions.
+2. Never invent live-data readings.
+3. Never invent vehicle specifications.
+4. Never invent OEM reference values.
+5. Missing values must NEVER be treated as zero.
+6. Unsupported parameters must be identified as unsupported
+   or unavailable, not as a fault.
+7. A DTC alone does not prove that a component has failed.
+8. Never recommend replacing a component based only on a DTC.
+9. Separate confirmed facts from possible explanations.
+10. Explain evidence supporting and contradicting each finding.
+11. Give practical next diagnostic tests in the correct sequence.
+12. Do not claim that a vehicle is fault-free simply because
+    no DTC was found.
+13. Clearly mention limitations and unavailable data.
+14. Safety-critical faults must be highlighted.
+15. Do not invent vehicle-specific expected readings.
+16. Only use OEM specifications when a verified source
+    is provided.
+17. Visual observations from photos are not proof of
+    internal mechanical or electrical faults.
+18. Do not invent a numeric vehicle health score.
+19. If evidence is insufficient, state that further
+    diagnosis is required.
 
-Use these fault classifications:
+FINDING CLASSIFICATIONS:
+
 - Confirmed
 - Strongly Suspected
 - Possible
 - No Fault Detected
 - Further Diagnosis Required
 
-Provide practical instructions for the inspector.
+Use professional but understandable language.
 """
 
 
-def generate_diagnostic_questions(vehicle, complaint):
+# --------------------------------------------------
+# 2. GET OPENAI API KEY
+# --------------------------------------------------
+
+def get_api_key():
+
+    try:
+
+        key = st.secrets.get(
+            "OPENAI_API_KEY",
+            ""
+        )
+
+    except Exception:
+
+        key = ""
+
+    return key or os.getenv(
+        "OPENAI_API_KEY",
+        ""
+    )
+
+
+# --------------------------------------------------
+# 3. GET OPENAI MODEL
+# --------------------------------------------------
+
+def get_model():
+
+    try:
+
+        model = st.secrets.get(
+            "OPENAI_MODEL",
+            ""
+        )
+
+    except Exception:
+
+        model = ""
+
+    return model or os.getenv(
+        "OPENAI_MODEL",
+        "gpt-5.5"
+    )
+
+
+# --------------------------------------------------
+# 4. CONNECT TO OPENAI
+# --------------------------------------------------
+
+def get_client():
+
+    api_key = get_api_key()
+
+    if not api_key:
+
+        raise ValueError(
+            "OPENAI_API_KEY is missing. "
+            "Please configure it in Streamlit Secrets."
+        )
+
+    return OpenAI(
+        api_key=api_key
+    )
+
+
+# --------------------------------------------------
+# 5. FORMAT VEHICLE INFORMATION
+# --------------------------------------------------
+
+def vehicle_context(vehicle):
+
+    return json.dumps(
+        vehicle or {},
+        ensure_ascii=False,
+        indent=2,
+        default=str
+    )
+
+
+# --------------------------------------------------
+# 6. GENERATE DIAGNOSTIC QUESTIONS
+# --------------------------------------------------
+
+def generate_diagnostic_questions(
+    vehicle,
+    complaint
+):
+
     client = get_client()
 
     prompt = f"""
-Create a diagnostic questionnaire for this vehicle complaint.
+VEHICLE INFORMATION:
 
-VEHICLE:
-{json.dumps(vehicle, ensure_ascii=False)}
+{vehicle_context(vehicle)}
 
 CUSTOMER COMPLAINT:
+
 {complaint}
 
-Return:
-1. Questions to ask the customer.
-2. Questions for the inspector.
-3. Physical checks required.
-4. Relevant modules to investigate.
-5. Live data parameters required.
-6. Why each parameter is required.
+TASK:
 
-Classify every parameter:
-Must Have / Optional / Vehicle Dependent.
+Prepare a practical diagnostic and inspection plan
+for this vehicle and complaint.
 
-Do not claim a parameter is supported unless verified.
-Return a clear practical response.
+Return the following sections:
+
+1. CUSTOMER CLARIFICATION QUESTIONS
+
+Questions that help understand the complaint.
+
+2. INSPECTOR QUESTIONS
+
+Questions the inspector should ask or verify.
+
+3. PHYSICAL INSPECTION CHECKLIST
+
+Practical checks to perform on the vehicle.
+
+4. CONTROL MODULES TO SCAN
+
+Identify relevant modules such as:
+
+- Engine
+- Transmission
+- ABS / ESC
+- SRS / Airbag
+- EPS
+- HVAC
+- AWD / 4WD
+- ADAS
+- BCM / Body Electrical
+- Battery / Charging
+- Hybrid / EV
+- TPMS
+- Other available OEM modules
+
+Only recommend modules relevant to the vehicle
+and complaint.
+
+5. LIVE DATA PARAMETERS
+
+Group parameters by module.
+
+Classify each parameter as:
+
+- Must Have
+- Optional
+- Vehicle Dependent
+
+IMPORTANT:
+
+Do not claim that a parameter is supported by the vehicle
+unless verified.
+
+Label generic suggestions as scanner/vehicle dependent.
+
+6. SAFETY PRECAUTIONS
+
+Mention any safety precautions relevant to the inspection.
+
+Keep the plan practical for a mobile pre-purchase
+vehicle inspection.
 """
 
     response = client.responses.create(
+
         model=get_model(),
+
         instructions=SYSTEM_INSTRUCTIONS,
+
         input=prompt
+
     )
 
     return response.output_text
 
+
+# --------------------------------------------------
+# 7. PREPARE CSV DATA FOR AI
+# --------------------------------------------------
+
+def prepare_csv_context(module_data):
+
+    summary = build_csv_ai_summary(
+        module_data or {}
+    )
+
+    samples = []
+
+    for module, result in (
+        module_data or {}
+    ).items():
+
+        csv_text = get_csv_text_for_ai(
+            result,
+            max_rows=120
+        )
+
+        samples.append(
+            f"""
+MODULE: {module}
+
+CSV DATA:
+
+{csv_text}
+"""
+        )
+
+    return summary, "\n".join(samples)
+
+
+# --------------------------------------------------
+# 8. PREPARE IMAGE INPUT
+# --------------------------------------------------
+
+def prepare_image_content(image_files):
+
+    content = []
+
+    for uploaded_image in (
+        image_files or []
+    )[:8]:
+
+        try:
+
+            image_bytes = uploaded_image.getvalue()
+
+            mime_type = (
+                getattr(
+                    uploaded_image,
+                    "type",
+                    None
+                )
+                or mimetypes.guess_type(
+                    getattr(
+                        uploaded_image,
+                        "name",
+                        ""
+                    )
+                )[0]
+                or "image/jpeg"
+            )
+
+            encoded_image = base64.b64encode(
+                image_bytes
+            ).decode("utf-8")
+
+            content.append({
+
+                "type": "input_image",
+
+                "image_url": (
+                    f"data:{mime_type};base64,{encoded_image}"
+                )
+
+            })
+
+        except Exception:
+
+            continue
+
+    return content
+
+
+# --------------------------------------------------
+# 9. COMPLETE VEHICLE DIAGNOSTIC ANALYSIS
+# --------------------------------------------------
 
 def analyze_vehicle(
     vehicle,
@@ -112,105 +337,219 @@ def analyze_vehicle(
     answers,
     module_data,
     dtc_text,
-    freeze_frame,
+    freeze_frame_text,
     scan_text,
     physical_notes,
     image_files=None
 ):
+
     client = get_client()
 
-    input_content = []
+    csv_summary, csv_samples = prepare_csv_context(
+        module_data
+    )
 
-    diagnostic_context = {
-        "vehicle": vehicle,
-        "customer_complaint": complaint,
-        "questionnaire_answers": answers,
-        "module_live_data": module_data,
-        "dtc_codes_and_scan_findings": dtc_text,
-        "freeze_frame": freeze_frame,
-        "full_scan_report_text": scan_text,
-        "physical_inspection_notes": physical_notes
-    }
+    prompt = f"""
+DOCTOR CAR - COMPLETE VEHICLE DIAGNOSTIC CASE
 
-    input_content.append({
-        "type": "input_text",
-        "text": (
-            "Analyze this vehicle using the available evidence.\n\n"
-            + json.dumps(
-                diagnostic_context,
-                ensure_ascii=False,
-                default=str
-            )
-            + """
+==================================================
+1. VEHICLE INFORMATION
+==================================================
 
-Prepare a professional Doctor Car diagnostic report.
+{vehicle_context(vehicle)}
 
-Include these sections:
 
-1. Executive Summary
-2. Vehicle and Complaint Overview
-3. Data Availability and Missing Parameters
-4. DTC Analysis
-5. Engine Analysis
-6. Transmission Analysis
-7. Other Relevant Module Analysis
-8. Photo Evidence Findings
-9. Confirmed Faults
-10. Strongly Suspected Faults
-11. Possible Faults
-12. No Fault Detected
-13. Further Diagnosis Required
-14. Most Likely Root Cause
-15. Step-by-Step Next Diagnostic Tests
-16. Expected Results and Interpretation
-17. Repair Recommendations
-18. Repair Priority
-19. Verification Procedure
-20. Diagnostic Confidence
-21. Module Health Assessment
-22. Important Safety Warnings
+==================================================
+2. CUSTOMER COMPLAINT
+==================================================
 
-For every finding provide:
-- Finding
-- Classification
-- Actual evidence
-- Reasoning
+{complaint}
+
+
+==================================================
+3. INSPECTOR ANSWERS
+==================================================
+
+{answers}
+
+
+==================================================
+4. LIVE DATA SUMMARY
+==================================================
+
+{csv_summary}
+
+
+==================================================
+5. RAW LIVE DATA SAMPLES
+==================================================
+
+{csv_samples}
+
+
+==================================================
+6. DTC AND FULL SCAN INFORMATION
+==================================================
+
+{dtc_text}
+
+
+==================================================
+7. FREEZE FRAME DATA
+==================================================
+
+{freeze_frame_text}
+
+
+==================================================
+8. FULL SCAN PDF TEXT
+==================================================
+
+{scan_text}
+
+
+==================================================
+9. PHYSICAL INSPECTION NOTES
+==================================================
+
+{physical_notes}
+
+
+==================================================
+10. REQUIRED DIAGNOSTIC REPORT
+==================================================
+
+Prepare a professional evidence-based report
+with the following sections:
+
+A. EXECUTIVE SUMMARY
+
+Explain the overall inspection findings.
+
+B. VEHICLE AND CUSTOMER COMPLAINT
+
+Summarize the vehicle and reported problem.
+
+C. DATA QUALITY
+
+Explain:
+
+- Data received
+- Parameters identified
+- Missing readings
+- Unavailable parameters
+- Unsupported parameters
+- Unmapped scanner values
+- Limitations of the available data
+
+D. MODULE-BY-MODULE FINDINGS
+
+Analyze each available module separately.
+
+E. DTC INTERPRETATION
+
+Explain the available trouble codes.
+
+Do not assume a DTC proves component failure.
+
+F. ROOT CAUSE POSSIBILITIES
+
+Rank possible causes according to evidence.
+
+For every cause provide:
+
+- Finding classification
+- Supporting evidence
+- Contradicting evidence
 - Confidence level
-- Next test
+- What remains unverified
 
-Do not invent readings or vehicle specifications.
+G. NEXT DIAGNOSTIC TESTS
 
-Do not assign a health score when evidence is insufficient.
-Clearly separate data completeness from vehicle health.
+Give the exact practical test sequence.
 
-Return the report in readable Markdown.
+Explain what each test is intended to confirm.
+
+H. REPAIR DIRECTION
+
+Recommend repair direction only when evidence supports it.
+
+Do not guess parts.
+
+I. SAFETY CONCERNS
+
+Highlight safety-critical findings.
+
+J. LIMITATIONS
+
+Clearly mention tests not performed
+and information not available.
+
+K. CUSTOMER-FRIENDLY CONCLUSION
+
+Explain the findings in simple professional language.
+
+IMPORTANT:
+
+Do not invent expected OEM readings.
+
+Do not calculate a numeric vehicle health score.
+
+Do not interpret missing readings as zero.
+
+Do not claim No Fault Detected means
+that no fault exists.
+
+Use these finding classifications:
+
+- Confirmed
+- Strongly Suspected
+- Possible
+- No Fault Detected
+- Further Diagnosis Required
+
+Separate observations from interpretations.
+
+If evidence is insufficient, recommend further diagnosis.
 """
-        )
-    })
 
-    # Optional photo evidence.
-    # Images are sent individually; videos are not interpreted as
-    # complete videos by this version.
-    for image_file in (image_files or [])[:8]:
-        image_bytes = image_file.getvalue()
-        encoded = base64.b64encode(image_bytes).decode("utf-8")
 
-        mime = image_file.type or "image/jpeg"
+    # Main AI text input
 
-        input_content.append({
-            "type": "input_image",
-            "image_url": f"data:{mime};base64,{encoded}"
-        })
+    content = [
+        {
+            "type": "input_text",
+            "text": prompt
+        }
+    ]
+
+
+    # Add inspection photographs
+
+    image_content = prepare_image_content(
+        image_files
+    )
+
+    content.extend(
+        image_content
+    )
+
+
+    # Send complete case to OpenAI
 
     response = client.responses.create(
+
         model=get_model(),
+
         instructions=SYSTEM_INSTRUCTIONS,
+
         input=[
             {
                 "role": "user",
-                "content": input_content
+                "content": content
             }
         ]
+
     )
 
     return response.output_text
