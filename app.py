@@ -1,353 +1,875 @@
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import sqlite3
+import uuid
+import os
+import re
+
+from datetime import datetime
+
+from csv_analyzer import (
+    analyze_csv,
+    get_csv_text_for_ai
+)
+
+from diagnostic_engine import (
+    generate_diagnostic_questions,
+    analyze_vehicle
+)
+
+from report_generator import generate_pdf
+
+
+# --------------------------------------------------
+# PAGE CONFIGURATION
+# --------------------------------------------------
 
 st.set_page_config(
-    page_title="Doctor Car: Master Forensic Diagnostic AI",
-    page_icon="🚗",
+    page_title="Doctor Car AI Diagnostic System",
+    page_icon="🚘",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.title(
-    "🚗 Doctor Car: Master Forensic Diagnostic AI & Complete Vehicle Inspector"
-)
-st.markdown(
-    "Comprehensive multi-system live data analysis, parameter selection"
-    " guides, physical photo inspection, interactive AI diagnostics, and 100%"
-    " accurate professional reporting."
-)
 
-# 1. Vehicle & Inspection Basic Information
-st.header("1. Vehicle & Inspection Basic Information")
-col1, col2 = st.columns(2)
-with col1:
-  vehicle_brand = st.text_input(
-      "Vehicle Brand",
-      placeholder="e.g., Nissan, Land Rover, Toyota, Honda, Ford, etc.",
-  )
-  vehicle_model = st.text_input(
-      "Model", placeholder="e.g., Pathfinder, Accord, Discovery, Wrangler, etc."
-  )
-  manufacture_year = st.number_input(
-      "Manufacture Year", min_value=1990, max_value=2026, value=2020
-  )
-with col2:
-  engine_spec = st.text_input(
-      "Engine Specification & Fuel Type",
-      placeholder="e.g., 2.0L Turbo / 3.5L V6 Petrol / Diesel",
-  )
-  spec_region = st.selectbox(
-      "Vehicle Specification Region",
-      ["GCC Spec", "American Spec", "Japanese Spec", "European Spec", "Other"],
-  )
-  drive_duration = st.selectbox(
-      "Log Duration / Drive Time (From Cold Start)",
-      [
-          "Cold Start to Normal Operating Temp (15-20 mins) - Recommended",
-          "Short Trip (< 10 mins - Cold)",
-          "Long Highway Drive (> 30 mins)",
-          "Idle Test Only",
-      ],
-  )
+# --------------------------------------------------
+# BRANDING
+# --------------------------------------------------
 
-# 2. Module Parameter Guides & File Uploaders
-st.header(
-    "2. Multi-Module Live Data Logs (CSV/PDF) & Mandatory Parameter Checklists"
-)
-st.markdown(
-    "Ensure you select these exact parameters from your scanner (Autel /"
-    " ThinkDiag) before exporting logs:"
-)
+st.markdown("""
+<style>
+.stApp {
+    background-color: #F6F8FB;
+}
+.main-title {
+    color: #102B46;
+    font-size: 32px;
+    font-weight: 800;
+}
+.subtitle {
+    color: #C99A36;
+    font-size: 14px;
+    font-weight: 600;
+}
+div.stButton > button {
+    background-color: #102B46;
+    color: white;
+    border-radius: 8px;
+    border: 1px solid #C99A36;
+    min-height: 42px;
+}
+div.stButton > button:hover {
+    background-color: #1769AA;
+    color: white;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# Module 1: ECM
-with st.expander(
-    "1. Engine ECU (ECM) - Mandatory & Optional Parameters Guide"
+
+# --------------------------------------------------
+# DATABASE
+# --------------------------------------------------
+
+DB_FILE = "doctor_car_history.db"
+
+
+def initialize_database():
+    connection = sqlite3.connect(DB_FILE)
+
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS inspections (
+            id TEXT PRIMARY KEY,
+            created_at TEXT,
+            customer_name TEXT,
+            vehicle TEXT,
+            complaint TEXT,
+            diagnosis TEXT,
+            report_pdf BLOB
+        )
+    """)
+
+    connection.commit()
+    connection.close()
+
+
+def save_inspection(
+    report_id,
+    customer_name,
+    vehicle,
+    complaint,
+    diagnosis,
+    pdf_bytes
 ):
-  st.markdown("""
-    * **🔴 Mandatory Parameters:** `Engine RPM` (Idle: 650-800), `Coolant Temp (ECT)` (85-105°C), `STFT Bank 1/2` (-10% to +10%), `LTFT Bank 1/2` (-10% to +10%), `MAF Sensor (g/s)` or `MAP Sensor (kPa)`, `Barometric Pressure`.
-    * **🟡 Optional Parameters:** `O2 Sensor Voltage`, `Ignition Timing Advance`, `Fuel Rail Pressure`, `Misfire Count`, `Engine Load (%)`.
-    """)
-ecm_file = st.file_uploader(
-    "Upload Engine ECM Log (CSV / TXT / PDF)",
-    type=["csv", "txt", "pdf"],
-    key="ecm",
-)
+    connection = sqlite3.connect(DB_FILE)
 
-# Module 2: TCM
-with st.expander(
-    "2. Transmission ECU (TCM) - Mandatory & Optional Parameters Guide"
-):
-  st.markdown("""
-    * **🔴 Mandatory Parameters:** `ATF Temperature` (70-95°C), `Current Gear`, `Commanded Gear`.
-    * **🟡 Optional Parameters:** `Input/Output Shaft Speed`, `Torque Converter Slip (RPM)`, `Shift Solenoid Status`.
-    """)
-tcm_file = st.file_uploader(
-    "Upload Transmission TCM Log (CSV / TXT / PDF)",
-    type=["csv", "txt", "pdf"],
-    key="tcm",
-)
+    connection.execute("""
+        INSERT INTO inspections
+        (id, created_at, customer_name, vehicle,
+         complaint, diagnosis, report_pdf)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        report_id,
+        datetime.now().isoformat(timespec="seconds"),
+        customer_name,
+        str(vehicle),
+        complaint,
+        diagnosis,
+        pdf_bytes
+    ))
 
-# Module 3: ABS & Brakes
-with st.expander(
-    "3. ABS & Braking System - Mandatory & Optional Parameters Guide"
-):
-  st.markdown("""
-    * **🔴 Mandatory Parameters:** `Wheel Speed Sensors (FL, FR, RL, RR)` (Crucial for ABS/Traction faults), `Brake Pressure Sensor`.
-    * **🟡 Optional Parameters:** `ABS Pump Motor Status`, `Yaw Rate / Lateral Acceleration Sensor`.
-    """)
-abs_file = st.file_uploader(
-    "Upload ABS & Braking Log (CSV / TXT / PDF)",
-    type=["csv", "txt", "pdf"],
-    key="abs",
-)
+    connection.commit()
+    connection.close()
 
-# Module 4: SRS
-with st.expander(
-    "4. SRS / Airbag Module - Mandatory Guide (Tampering & Resistor Detection)"
-):
-  st.markdown("""
-    * **🔴 Mandatory Parameters:** `Airbag Deployment Status`, `Crash Event Memory Stored`, `Warning Lamp (SRS) Status`.
-    * **🟡 Optional Parameters:** `Squib / Resistor Resistance Values` (Used to detect simulated resistors or diodes hiding deployed airbags).
-    """)
-srs_file = st.file_uploader(
-    "Upload SRS / Airbag Log (CSV / TXT / PDF)",
-    type=["csv", "txt", "pdf"],
-    key="srs",
-)
 
-# Module 5: EPS & Suspension
-with st.expander("5. Steering (EPS) & Suspension - Parameter Guide"):
-  st.markdown(
-      "* **🔴 Mandatory Parameters:** `Steering Angle Sensor`, `Steering Torque"
-      " Sensor`, `EPS Motor Current`."
-  )
-eps_file = st.file_uploader(
-    "Upload Steering EPS Log (CSV / TXT / PDF)",
-    type=["csv", "txt", "pdf"],
-    key="eps",
-)
+def get_inspection_history():
+    connection = sqlite3.connect(DB_FILE)
 
-# Module 6: HVAC & AC
-with st.expander("6. HVAC / AC System - Parameter Guide"):
-  st.markdown("""
-    * **🔴 Mandatory Parameters:** `Evaporator Temperature` (2-7°C), `AC Compressor Pressure / Command`, `Blower Speed`.
-    * **🟡 Optional Parameters:** `Blend Door Position`, `Ambient Air Temperature`.
-    """)
-hvac_file = st.file_uploader(
-    "Upload HVAC Log (CSV / TXT / PDF)", type=["csv", "txt", "pdf"], key="hvac"
-)
+    df = pd.read_sql_query("""
+        SELECT id, created_at, customer_name,
+               vehicle, complaint
+        FROM inspections
+        ORDER BY created_at DESC
+    """, connection)
 
-# Module 7: 4WD / AWD
-with st.expander("7. 4WD / AWD Drivetrain - Parameter Guide"):
-  st.markdown(
-      "* **🔴 Mandatory Parameters:** `Transfer Case Mode`, `Clutch Engagement"
-      " Status (%)`, `Front/Rear Axle Speeds`."
-  )
-awd_file = st.file_uploader(
-    "Upload 4WD / AWD Log (CSV / TXT / PDF)",
-    type=["csv", "txt", "pdf"],
-    key="awd",
-)
+    connection.close()
+    return df
 
-# Module 8: BCM & Electrical
-with st.expander("8. BCM & Electrical - Parameter Guide"):
-  st.markdown(
-      "* **🔴 Mandatory Parameters:** `Battery Voltage` (Running: 13.5-14.5V),"
-      " `Ignition Switch Status`."
-  )
-bcm_file = st.file_uploader(
-    "Upload BCM Log (CSV / TXT / PDF)", type=["csv", "txt", "pdf"], key="bcm"
-)
 
-# Module 9: ADAS
-with st.expander("9. ADAS & Sensors - Parameter Guide"):
-  st.markdown(
-      "* **🔴 Mandatory Parameters:** `Radar & Camera Calibration Status`,"
-      " `Obstacle Distance DTCs`."
-  )
-adas_file = st.file_uploader(
-    "Upload ADAS Log (CSV / TXT / PDF)", type=["csv", "txt", "pdf"], key="adas"
-)
+# --------------------------------------------------
+# PDF TEXT EXTRACTION
+# --------------------------------------------------
 
-# Module 10: Full Scan PDF
-with st.expander("10. Full System Health Check Report - Upload"):
-  st.markdown(
-      "Upload full vehicle health scan PDF containing overall DTCs & Readiness"
-      " monitors."
-  )
-full_scan_file = st.file_uploader(
-    "Upload Full Scan Report (PDF / TXT / CSV)",
-    type=["pdf", "txt", "csv"],
-    key="full_scan",
-)
+def extract_pdf_text(uploaded_pdf):
+    from pypdf import PdfReader
+    from io import BytesIO
 
-# 11. Component Photo Upload
-st.subheader(
-    "📸 Upload Physical Component Photos (Visual Anomaly Verification)"
-)
-component_images = st.file_uploader(
-    "Upload photos of physical damage, oil leaks, airbag tampering, or bulging"
-    " components (JPG, PNG)",
-    type=["jpg", "png", "jpeg"],
-    accept_multiple_files=True,
-    key="images",
-)
-
-# ---- Live Data Sensor Graphing Section ----
-if ecm_file is not None and ecm_file.name.endswith(".csv"):
-  try:
-    df = pd.read_csv(ecm_file)
-    st.subheader("📊 Live Sensor Data Plotter & Graph Analysis (Engine ECM)")
-    numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns.tolist()
-    if numeric_cols:
-      selected_columns = st.multiselect(
-          "Select Sensor Parameters to Plot Line Chart",
-          numeric_cols,
-          default=numeric_cols[:3] if len(numeric_cols) >= 3 else numeric_cols,
-      )
-      if selected_columns:
-        st.line_chart(df[selected_columns])
-  except Exception as e:
-    st.error(f"Could not parse CSV for sensor plotting: {e}")
-
-# 3. Ask AI & Interactive Clarifications
-st.header(
-    "3. Ask AI: Primary Complaint & Interactive Diagnostic Clarifications"
-)
-st.markdown(
-    "Enter the exact driver complaint. Answer AI's interactive questions to"
-    " correlate symptoms with live data and achieve 100% diagnostic accuracy."
-)
-
-custom_dtc_input = st.text_input(
-    "Primary Complaint / Observed Symptom",
-    placeholder=(
-        "e.g., Gear shifting delay, Traction light on, AC not cooling, Engine"
-        " vibration"
-    ),
-)
-
-clarification_input = st.text_input(
-    "Interactive Clarification (Answer behavioral details e.g., speed range, gear mode behavior, brake vs acceleration)",
-    placeholder=(
-        "e.g., Delay occurs specifically when shifting from 2nd to 3rd gear under"
-        " load"
-    ),
-)
-
-st.markdown("---")
-if st.button("Analyze Complete Vehicle Health & Generate Professional Report"):
-  if not vehicle_brand or not vehicle_model:
-    st.warning(
-        "Please enter both Vehicle Brand and Model to proceed with AI"
-        " analysis."
+    reader = PdfReader(
+        BytesIO(uploaded_pdf.getvalue())
     )
-  else:
-    with st.spinner(
-        "AI Master Diagnostic Engineer is strictly correlating your complaint, files, photos, and interactive answers... Please wait."
-    ):
 
-      complaint_lower = custom_dtc_input.lower()
+    pages = []
 
-      if "gear" in complaint_lower or "shift" in complaint_lower:
-        health_score = 78
-        root_cause_text = (
-            "1. Most Likely Cause (High Probability): Transmission fluid"
-            " degradation, low ATF level, shift solenoid response lag, or valve"
-            " body pressure drop.\n2. Secondary Cause (Medium Probability): TCM"
-            " software calibration issue or internal clutch pack wear."
+    for page in reader.pages:
+        pages.append(page.extract_text() or "")
+
+    return "\n".join(pages)
+
+
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
+
+def make_vehicle_data():
+    return {
+        "make": make,
+        "model": model,
+        "year": year,
+        "vin": vin,
+        "mileage": mileage,
+        "specification": specification,
+        "fuel": fuel,
+        "engine": engine,
+        "engine_code": engine_code,
+        "engine_capacity": engine_capacity,
+        "engine_power": engine_power,
+        "transmission": transmission,
+        "drivetrain": drivetrain
+    }
+
+
+def safe_filename(value):
+    value = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        str(value)
+    )
+    return value[:60] or "report"
+
+
+initialize_database()
+
+
+# --------------------------------------------------
+# HEADER
+# --------------------------------------------------
+
+st.markdown(
+    '<div class="main-title">🚘 DOCTOR CAR</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="subtitle">'
+    'AI-POWERED MULTI-SYSTEM VEHICLE DIAGNOSTICS'
+    '</div>',
+    unsafe_allow_html=True
+)
+
+st.divider()
+
+
+# --------------------------------------------------
+# SIDEBAR NAVIGATION
+# --------------------------------------------------
+
+page = st.sidebar.radio(
+    "NAVIGATION",
+    [
+        "New Inspection",
+        "Inspection History",
+        "System Information"
+    ]
+)
+
+
+# ==================================================
+# NEW INSPECTION
+# ==================================================
+
+if page == "New Inspection":
+
+    st.header("1. Vehicle & Inspection Information")
+
+    with st.form("vehicle_form"):
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            customer_name = st.text_input(
+                "Customer Name"
+            )
+
+            customer_phone = st.text_input(
+                "Customer Phone"
+            )
+
+            make = st.text_input(
+                "Vehicle Make",
+                placeholder="Toyota"
+            )
+
+            model = st.text_input(
+                "Vehicle Model",
+                placeholder="Camry"
+            )
+
+            year = st.text_input(
+                "Model Year",
+                placeholder="2022"
+            )
+
+        with col2:
+            vin = st.text_input("VIN")
+
+            mileage = st.text_input(
+                "Mileage (km)"
+            )
+
+            specification = st.selectbox(
+                "Vehicle Specification",
+                [
+                    "GCC",
+                    "USA",
+                    "Canada",
+                    "Japan",
+                    "Europe",
+                    "Korea",
+                    "Other",
+                    "Unknown"
+                ]
+            )
+
+            fuel = st.selectbox(
+                "Fuel Type",
+                [
+                    "Petrol",
+                    "Diesel",
+                    "Hybrid",
+                    "Plug-in Hybrid",
+                    "Electric",
+                    "Other",
+                    "Unknown"
+                ]
+            )
+
+            engine_capacity = st.text_input(
+                "Engine Capacity"
+            )
+
+        with col3:
+            engine = st.text_input(
+                "Engine Description"
+            )
+
+            engine_code = st.text_input(
+                "Engine Code (if known)"
+            )
+
+            engine_power = st.text_input(
+                "Engine Power (if known)"
+            )
+
+            transmission = st.selectbox(
+                "Transmission",
+                [
+                    "Automatic",
+                    "Manual",
+                    "CVT",
+                    "DCT",
+                    "Other",
+                    "Unknown"
+                ]
+            )
+
+            drivetrain = st.selectbox(
+                "Drivetrain",
+                [
+                    "FWD",
+                    "RWD",
+                    "AWD",
+                    "4WD",
+                    "Unknown"
+                ]
+            )
+
+        st.markdown("### Customer Complaint")
+
+        complaint = st.text_area(
+            "Describe the exact complaint",
+            placeholder=(
+                "Example: Engine power loss during acceleration. "
+                "Vehicle struggles uphill."
+            ),
+            height=100
         )
-        action_text = (
-            "Action 1: Check ATF fluid level, color, and contamination.\nAction"
-            " 2: Scan TCM live data to verify Commanded Gear vs Current Gear"
-            " synchronization.\nAction 3: Inspect shift solenoids and valve"
-            " body operation."
-        )
-      elif "traction" in complaint_lower or "abs" in complaint_lower:
-        health_score = 82
-        root_cause_text = (
-            "1. Most Likely Cause (High Probability): Wheel speed sensor signal"
-            " drop, tone ring contamination, or faulty ABS wheel bearing"
-            " sensor.\n2. Secondary Cause (Medium Probability): Steering"
-            " angle sensor miscalibration or brake pressure sensor fault."
-        )
-        action_text = (
-            "Action 1: Monitor 4-wheel speed sensor live data graphs during a"
-            " test drive to find dropping signals.\nAction 2: Inspect wheel"
-            " speed sensor wiring harnesses and clean magnetic tone"
-            " rings.\nAction 3: Perform steering angle sensor calibration if"
-            " required."
-        )
-      elif "ac" in complaint_lower or "cooling" in complaint_lower:
-        health_score = 80
-        root_cause_text = (
-            "1. Most Likely Cause (High Probability): AC refrigerant"
-            " undercharge/leak, compressor control valve failure, or condenser"
-            " clogging.\n2. Secondary Cause (Medium Probability): Blend door"
-            " actuator failure or evaporator temperature sensor error."
-        )
-        action_text = (
-            "Action 1: Check high and low side AC pressures using manifold"
-            " gauges.\nAction 2: Inspect condenser fan operation and engine"
-            " coolant temperature.\nAction 3: Recover and recharge refrigerant"
-            " to factory specifications."
-        )
-      else:
-        health_score = 85
-        root_cause_text = (
-            "1. Most Likely Cause (High Probability): Specific component wear"
-            f" related to '{custom_dtc_input}'.\n2. Secondary Cause (Medium"
-            " Probability): Associated sensor signal fluctuation or wiring"
-            " resistance."
-        )
-        action_text = (
-            "Action 1: Perform targeted multi-meter and live data module"
-            " inspection.\nAction 2: Clean or replace verified faulty"
-            " components."
+
+        submitted = st.form_submit_button(
+            "Save Vehicle Information",
+            use_container_width=True
         )
 
-      num_photos = len(component_images) if component_images else 0
+    if submitted:
 
-      report_content = f"""
-==================================================
-DOCTOR CAR - OFFICIAL MASTER DIAGNOSTIC REPORT
-==================================================
-Vehicle Profile: {vehicle_brand} {vehicle_model} ({manufacture_year})
-Engine Spec: {engine_spec} | Region: {spec_region}
-Test Drive Duration: {drive_duration}
-Primary Complaint: {custom_dtc_input}
-Interactive Behavior Answers: {clarification_input}
-Physical Photos Attached: {num_photos} Image File(s)
+        if not make or not model or not complaint:
+            st.error(
+                "Make, Model and Customer Complaint are required."
+            )
 
-1. OVERALL VEHICLE HEALTH SCORE: {health_score} / 100
+        else:
+            st.session_state["vehicle"] = make_vehicle_data()
+            st.session_state["customer_name"] = customer_name
+            st.session_state["customer_phone"] = customer_phone
+            st.session_state["complaint"] = complaint
 
-2. STRICT SYMPTOM & MODULE CORRELATION:
-- Primary Complaint Analyzed: '{custom_dtc_input}'
-- Behavioral Context: '{clarification_input}'
-{root_cause_text}
+            st.success(
+                "Vehicle information saved for this inspection."
+            )
 
-3. MULTI-MODULE FORENSIC SCAN RESULTS:
-- Engine (ECM): Parameters evaluated against mandatory checklist.
-- Transmission (TCM): Evaluated for shift timing, ATF temp, and gear synchronization.
-- ABS / Braking / Traction: Wheel speed correlation verified across all 4 wheels.
-- SRS / Airbags (Forensic Tampering Check): Evaluated squib resistance parameters. No resistor/diode warning light bypass detected.
-- HVAC, Steering (EPS), BCM & ADAS: Operating within normal factory tolerances.
+    if "vehicle" in st.session_state:
 
-4. 100% ACCURATE ACTION PLAN & REPAIR RECOMMENDATIONS:
-{action_text}
-==================================================
-"""
+        vehicle = st.session_state["vehicle"]
+        complaint = st.session_state["complaint"]
 
-      st.success(
-          "Diagnostic & Forensic Health Analysis Completed Successfully!"
-      )
-      st.markdown("### 📄 Doctor Car Official Master Diagnostic Report")
-      st.text_area(
-          "Inspection Report Output", report_content, height=420
-      )
+        st.divider()
 
-      st.download_button(
-          label="📥 Download Professional Inspection Report",
-          data=report_content,
-          file_name=f"DoctorCar_MasterReport_{vehicle_brand}_{vehicle_model}.txt",
-          mime="text/plain",
-      )
+        # ------------------------------------------
+        # AI QUESTIONS
+        # ------------------------------------------
+
+        st.header("2. AI Diagnostic Questions")
+
+        if st.button(
+            "Generate Vehicle-Specific Diagnostic Questions",
+            use_container_width=True
+        ):
+
+            with st.spinner(
+                "AI is preparing diagnostic questions..."
+            ):
+
+                try:
+                    questions = generate_diagnostic_questions(
+                        vehicle,
+                        complaint
+                    )
+
+                    st.session_state["ai_questions"] = questions
+
+                except Exception as error:
+                    st.error(f"AI Error: {error}")
+
+        if "ai_questions" in st.session_state:
+
+            st.markdown(
+                st.session_state["ai_questions"]
+            )
+
+        answers = st.text_area(
+            "Inspector Questionnaire Answers",
+            placeholder=(
+                "Enter customer answers, when the problem occurs, "
+                "cold/hot condition, warning lights, recent repairs, "
+                "driving conditions and other findings."
+            ),
+            height=140
+        )
+
+        # ------------------------------------------
+        # MODULE DATA UPLOAD
+        # ------------------------------------------
+
+        st.divider()
+
+        st.header("3. Module-Wise Live Data Upload")
+
+        st.info(
+            "Upload the CSV files exported from THINKDIAG 2. "
+            "Upload each module separately wherever possible. "
+            "Unsupported or unavailable parameters will not be "
+            "treated as zero."
+        )
+
+        modules = [
+            "Engine / ECM / PCM",
+            "Transmission / TCM",
+            "ABS / ESC",
+            "SRS / Airbag",
+            "Steering / EPS",
+            "HVAC / Air Conditioning",
+            "AWD / 4WD",
+            "ADAS",
+            "BCM / Body Electrical",
+            "Battery / Charging",
+            "Hybrid / EV",
+            "TPMS",
+            "Other Module"
+        ]
+
+        module_data = {}
+
+        for module in modules:
+
+            with st.expander(module):
+
+                uploaded_csv = st.file_uploader(
+                    f"Upload {module} CSV",
+                    type=["csv", "txt"],
+                    key=f"csv_{module}"
+                )
+
+                if uploaded_csv:
+
+                    try:
+                        result = analyze_csv(
+                            uploaded_csv
+                        )
+
+                        module_data[module] = {
+                            "filename": uploaded_csv.name,
+                            "rows": result["rows"],
+                            "columns": result["columns"],
+                            "summary": result["summary"],
+                            "csv_text": get_csv_text_for_ai(
+                                result
+                            )
+                        }
+
+                        st.success(
+                            f"File read successfully: "
+                            f"{result['rows']} rows"
+                        )
+
+                        st.write(
+                            "**Detected Parameters**"
+                        )
+
+                        if result["summary"]:
+
+                            summary_df = pd.DataFrame(
+                                result["summary"]
+                            )
+
+                            st.dataframe(
+                                summary_df,
+                                use_container_width=True
+                            )
+
+                        else:
+                            st.warning(
+                                "No known parameter names "
+                                "were automatically recognized. "
+                                "Raw CSV data is retained for AI review."
+                            )
+
+                        if result["unmapped"]:
+                            st.caption(
+                                "Other columns: "
+                                + ", ".join(
+                                    result["unmapped"][:30]
+                                )
+                            )
+
+                    except Exception as error:
+                        st.error(
+                            f"CSV Error: {error}"
+                        )
+
+        # ------------------------------------------
+        # SCAN REPORT
+        # ------------------------------------------
+
+        st.divider()
+
+        st.header("4. Full Vehicle Scan Report")
+
+        scan_pdf = st.file_uploader(
+            "Upload Full Vehicle Scan PDF",
+            type=["pdf"],
+            key="full_scan_pdf"
+        )
+
+        scan_text = ""
+
+        if scan_pdf:
+
+            try:
+                scan_text = extract_pdf_text(
+                    scan_pdf
+                )
+
+                st.success(
+                    "PDF text extracted successfully."
+                )
+
+                with st.expander(
+                    "View extracted scan report text"
+                ):
+                    st.text(
+                        scan_text[:15000]
+                    )
+
+            except Exception as error:
+                st.error(
+                    f"PDF extraction error: {error}"
+                )
+
+        dtc_text = st.text_area(
+            "DTC Codes and Descriptions",
+            placeholder=(
+                "Example:\n"
+                "P0299 - Turbocharger Underboost\n"
+                "P0101 - Mass Air Flow Range/Performance"
+            ),
+            height=100
+        )
+
+        freeze_frame = st.text_area(
+            "Freeze Frame Data",
+            placeholder=(
+                "Paste freeze-frame readings here, "
+                "including units and operating conditions."
+            ),
+            height=100
+        )
+
+        # ------------------------------------------
+        # PHYSICAL EVIDENCE
+        # ------------------------------------------
+
+        st.divider()
+
+        st.header("5. Physical Inspection & Evidence")
+
+        physical_notes = st.text_area(
+            "Inspector Physical Test Results",
+            placeholder=(
+                "Enter pressure test readings, smoke test, "
+                "mechanical noise, leakage, road test findings, "
+                "voltage readings and other physical evidence."
+            ),
+            height=120
+        )
+
+        photos = st.file_uploader(
+            "Upload Inspection Photos",
+            type=[
+                "jpg",
+                "jpeg",
+                "png",
+                "webp"
+            ],
+            accept_multiple_files=True,
+            key="inspection_photos"
+        )
+
+        videos = st.file_uploader(
+            "Upload Inspection Videos",
+            type=[
+                "mp4",
+                "mov",
+                "avi"
+            ],
+            accept_multiple_files=True,
+            key="inspection_videos"
+        )
+
+        if photos:
+            st.write(
+                f"{len(photos)} photos uploaded."
+            )
+
+            image_columns = st.columns(4)
+
+            for index, photo in enumerate(photos):
+                with image_columns[index % 4]:
+                    st.image(
+                        photo,
+                        caption=photo.name,
+                        use_container_width=True
+                    )
+
+        if videos:
+            st.info(
+                f"{len(videos)} video file(s) uploaded. "
+                "This version records their presence but does "
+                "not yet extract and analyze video frames."
+            )
+
+        # ------------------------------------------
+        # ANALYSIS
+        # ------------------------------------------
+
+        st.divider()
+
+        st.header("6. AI Diagnostic Analysis")
+
+        st.warning(
+            "Review the uploaded data and inspection notes "
+            "before generating the final diagnosis."
+        )
+
+        if st.button(
+            "RUN COMPLETE AI DIAGNOSTIC ANALYSIS",
+            type="primary",
+            use_container_width=True
+        ):
+
+            if not module_data and not scan_text and not dtc_text:
+                st.warning(
+                    "Upload at least one scan/CSV file or "
+                    "provide DTC information before analysis."
+                )
+
+            else:
+
+                with st.spinner(
+                    "Doctor Car AI is analyzing all available evidence..."
+                ):
+
+                    try:
+
+                        diagnosis = analyze_vehicle(
+                            vehicle=vehicle,
+                            complaint=complaint,
+                            answers=answers,
+                            module_data=module_data,
+                            dtc_text=dtc_text,
+                            freeze_frame=freeze_frame,
+                            scan_text=scan_text,
+                            physical_notes=physical_notes,
+                            image_files=photos
+                        )
+
+                        report_id = (
+                            "DC-"
+                            + datetime.now().strftime("%Y%m%d")
+                            + "-"
+                            + uuid.uuid4().hex[:6].upper()
+                        )
+
+                        pdf_bytes = generate_pdf(
+                            vehicle=vehicle,
+                            customer_name=st.session_state.get(
+                                "customer_name",
+                                ""
+                            ),
+                            complaint=complaint,
+                            diagnosis=diagnosis,
+                            report_id=report_id
+                        )
+
+                        save_inspection(
+                            report_id=report_id,
+                            customer_name=st.session_state.get(
+                                "customer_name",
+                                ""
+                            ),
+                            vehicle=vehicle,
+                            complaint=complaint,
+                            diagnosis=diagnosis,
+                            pdf_bytes=pdf_bytes
+                        )
+
+                        st.session_state["last_diagnosis"] = diagnosis
+                        st.session_state["last_pdf"] = pdf_bytes
+                        st.session_state["last_report_id"] = report_id
+
+                        st.success(
+                            "AI analysis completed and report saved."
+                        )
+
+                    except Exception as error:
+
+                        st.error(
+                            f"Diagnostic analysis failed: {error}"
+                        )
+
+        # ------------------------------------------
+        # RESULTS
+        # ------------------------------------------
+
+        if "last_diagnosis" in st.session_state:
+
+            st.divider()
+
+            st.header("7. Diagnostic Findings")
+
+            st.markdown(
+                st.session_state["last_diagnosis"]
+            )
+
+            st.download_button(
+                label="Download Doctor Car PDF Report",
+                data=st.session_state["last_pdf"],
+                file_name=(
+                    safe_filename(
+                        st.session_state["last_report_id"]
+                    )
+                    + ".pdf"
+                ),
+                mime="application/pdf",
+                use_container_width=True
+            )
+
+            st.caption(
+                "Report ID: "
+                + st.session_state["last_report_id"]
+            )
+
+
+# ==================================================
+# INSPECTION HISTORY
+# ==================================================
+
+elif page == "Inspection History":
+
+    st.header("Inspection History")
+
+    history = get_inspection_history()
+
+    if history.empty:
+
+        st.info(
+            "No saved inspections found."
+        )
+
+    else:
+
+        st.dataframe(
+            history,
+            use_container_width=True
+        )
+
+        selected_id = st.selectbox(
+            "Select Report ID",
+            history["id"].tolist()
+        )
+
+        if st.button("Download Selected Report"):
+
+            connection = sqlite3.connect(DB_FILE)
+
+            result = connection.execute(
+                "SELECT report_pdf FROM inspections WHERE id = ?",
+                (selected_id,)
+            ).fetchone()
+
+            connection.close()
+
+            if result and result[0]:
+
+                st.download_button(
+                    "Download PDF",
+                    data=result[0],
+                    file_name=f"{selected_id}.pdf",
+                    mime="application/pdf"
+                )
+
+            else:
+                st.error(
+                    "PDF not found."
+                )
+
+
+# ==================================================
+# SYSTEM INFORMATION
+# ==================================================
+
+elif page == "System Information":
+
+    st.header("Doctor Car AI Diagnostic System")
+
+    st.markdown("""
+    ### Supported Diagnostic Modules
+
+    - Engine / ECM / PCM
+    - Transmission / TCM
+    - ABS / ESC
+    - SRS / Airbag
+    - Steering / EPS
+    - HVAC
+    - AWD / 4WD
+    - ADAS
+    - BCM / Body Electrical
+    - Battery / Charging
+    - Hybrid / EV
+    - TPMS
+    - Other vehicle-specific modules
+
+    ### Scanner
+
+    THINKDIAG 2 CSV exports are supported through
+    the flexible CSV reader. Exact parameter mapping
+    depends on the labels and format exported by the scanner.
+
+    ### Diagnostic Limitations
+
+    - Not every vehicle exposes every parameter.
+    - Missing data is not considered zero.
+    - DTCs alone do not confirm component failure.
+    - OEM specifications must be verified.
+    - Physical tests may still be required.
+    - Uploaded videos are not frame-analyzed in this version.
+
+    ### Report
+
+    Doctor Car branded PDF report with findings,
+    evidence, next tests and disclaimer.
+    """)
+
+    st.info(
+        "AI-generated diagnostic output must be reviewed "
+        "and approved by a qualified inspector before "
+        "being shared as a final customer report."
+    )
+
+
+# --------------------------------------------------
+# FOOTER
+# --------------------------------------------------
+
+st.divider()
+
+st.caption(
+    "Doctor Car | AI-Powered Vehicle Diagnostics | UAE"
+)
