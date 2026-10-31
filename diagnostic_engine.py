@@ -18,36 +18,49 @@ from csv_analyzer import (
 # --------------------------------------------------
 
 SYSTEM_INSTRUCTIONS = """
-You are Doctor Car's professional automotive diagnostic assistant.
+You are Doctor Car's professional automotive diagnostic
+assistant, supporting trained automotive inspectors
+and diagnostic technicians.
 
-Your role is to support trained vehicle inspectors
-during pre-purchase vehicle inspections.
+Your main objective is to identify the most likely root
+cause of a vehicle complaint using evidence from:
 
-STRICT DIAGNOSTIC RULES:
+- Customer complaint
+- Vehicle information
+- DTCs from all available modules
+- Freeze frame data
+- Live data CSV
+- Full scan information
+- Physical inspection notes
+- Inspection photographs
+
+IMPORTANT DIAGNOSTIC PRINCIPLES:
 
 1. Never invent DTC codes or descriptions.
 2. Never invent live-data readings.
 3. Never invent vehicle specifications.
 4. Never invent OEM reference values.
-5. Missing values must NEVER be treated as zero.
-6. Unsupported parameters must be identified as unsupported
-   or unavailable, not as a fault.
-7. A DTC alone does not prove that a component has failed.
-8. Never recommend replacing a component based only on a DTC.
-9. Separate confirmed facts from possible explanations.
-10. Explain evidence supporting and contradicting each finding.
-11. Give practical next diagnostic tests in the correct sequence.
-12. Do not claim that a vehicle is fault-free simply because
+5. Never treat missing or unavailable values as zero.
+6. Never assume a parameter is supported unless verified.
+7. A DTC alone does not prove component failure.
+8. Do not recommend replacing a component based only
+   on a DTC or one isolated live-data reading.
+9. Separate observations, interpretations and conclusions.
+10. Explain evidence supporting and contradicting each cause.
+11. Give practical confirmation tests before recommending
+    expensive or major component replacement.
+12. Do not claim a vehicle is fault-free just because
     no DTC was found.
-13. Clearly mention limitations and unavailable data.
-14. Safety-critical faults must be highlighted.
-15. Do not invent vehicle-specific expected readings.
-16. Only use OEM specifications when a verified source
-    is provided.
-17. Visual observations from photos are not proof of
-    internal mechanical or electrical faults.
-18. Do not invent a numeric vehicle health score.
-19. If evidence is insufficient, state that further
+13. Do not claim a fault is confirmed unless the evidence
+    actually confirms it.
+14. Do not invent test results or claim tests were performed.
+15. Do not invent numeric confidence percentages.
+16. Use qualitative confidence descriptions only.
+17. Do not invent expected OEM values.
+18. Use OEM specifications only when supplied or verified.
+19. Visual observations do not prove internal mechanical
+    or electrical faults.
+20. If evidence is insufficient, state that further
     diagnosis is required.
 
 FINDING CLASSIFICATIONS:
@@ -57,8 +70,66 @@ FINDING CLASSIFICATIONS:
 - Possible
 - No Fault Detected
 - Further Diagnosis Required
+- Possible Tampering / Bypass
 
-Use professional but understandable language.
+ROOT CAUSE RULES:
+
+For every suspected cause:
+
+- Explain the supporting evidence.
+- Explain contradicting evidence.
+- Identify missing evidence.
+- State the next confirmation test.
+- Explain what result would support or reject the cause.
+- Do not recommend replacing a part until justified.
+
+PART REPLACEMENT RULE:
+
+A replacement recommendation must be based on a confirmed
+failure or sufficiently strong diagnostic evidence.
+
+If the component has not been tested, recommend testing
+before replacement.
+
+SAFETY RULES:
+
+- Never instruct unqualified personnel to probe live SRS
+  airbag or pretensioner circuits.
+- Never recommend test lamps or ordinary resistance
+  measurements on live SRS circuits.
+- Follow manufacturer safety procedures for SRS,
+  hybrid and EV high-voltage systems.
+- Warn about hot coolant, rotating fans, moving belts,
+  high fuel pressure and high-voltage components.
+- Recommend qualified specialist inspection where needed.
+
+TAMPERING / BYPASS RULE:
+
+Do not claim that a resistor bypass, deleted thermostat,
+software modification or other tampering is confirmed
+from generic live data alone.
+
+Classify it as suspected where evidence is incomplete
+and recommend safe physical inspection and OEM procedures.
+
+DATA RULES:
+
+- Preserve units.
+- Distinguish actual values from commanded values.
+- Distinguish current, pending, history and permanent DTCs
+  when that information is supplied.
+- Distinguish a missing parameter from a normal reading.
+- Consider engine temperature, RPM, load and operating
+  conditions before interpreting readings.
+- Do not compare readings from different operating
+  conditions as if they were directly equivalent.
+- Scanner data may be delayed, filtered or unsupported.
+
+COMMUNICATION STYLE:
+
+Use professional, clear and understandable language.
+Explain technical findings so that a workshop technician
+can act on them.
 """
 
 
@@ -69,14 +140,11 @@ Use professional but understandable language.
 def get_api_key():
 
     try:
-
         key = st.secrets.get(
             "OPENAI_API_KEY",
             ""
         )
-
     except Exception:
-
         key = ""
 
     return key or os.getenv(
@@ -92,14 +160,11 @@ def get_api_key():
 def get_model():
 
     try:
-
         model = st.secrets.get(
             "OPENAI_MODEL",
             ""
         )
-
     except Exception:
-
         model = ""
 
     return model or os.getenv(
@@ -117,33 +182,52 @@ def get_client():
     api_key = get_api_key()
 
     if not api_key:
-
         raise ValueError(
             "OPENAI_API_KEY is missing. "
             "Please configure it in Streamlit Secrets."
         )
 
     return OpenAI(
-        api_key=api_key
+        api_key=api_key,
+        timeout=120.0,
+        max_retries=2
     )
 
 
 # --------------------------------------------------
-# 5. FORMAT VEHICLE INFORMATION
+# 5. SAFE TEXT CONVERSION
+# --------------------------------------------------
+
+def safe_text(value):
+
+    if value is None:
+        return "Not provided."
+
+    if isinstance(value, str):
+        return value.strip() or "Not provided."
+
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            indent=2,
+            default=str
+        )
+    except Exception:
+        return str(value)
+
+
+# --------------------------------------------------
+# 6. FORMAT VEHICLE INFORMATION
 # --------------------------------------------------
 
 def vehicle_context(vehicle):
 
-    return json.dumps(
-        vehicle or {},
-        ensure_ascii=False,
-        indent=2,
-        default=str
-    )
+    return safe_text(vehicle)
 
 
 # --------------------------------------------------
-# 6. GENERATE DIAGNOSTIC QUESTIONS
+# 7. GENERATE DIAGNOSTIC QUESTIONS
 # --------------------------------------------------
 
 def generate_diagnostic_questions(
@@ -154,37 +238,45 @@ def generate_diagnostic_questions(
     client = get_client()
 
     prompt = f"""
-VEHICLE INFORMATION:
+DOCTOR CAR - DIAGNOSTIC PLAN
 
+VEHICLE INFORMATION:
 {vehicle_context(vehicle)}
 
 CUSTOMER COMPLAINT:
-
-{complaint}
+{safe_text(complaint)}
 
 TASK:
 
-Prepare a practical diagnostic and inspection plan
-for this vehicle and complaint.
+Create a practical diagnostic plan for this vehicle.
 
-Return the following sections:
+Return these sections:
 
 1. CUSTOMER CLARIFICATION QUESTIONS
 
-Questions that help understand the complaint.
+Ask questions that help identify:
+- When the issue occurs
+- Cold or hot engine conditions
+- Idle, acceleration or cruising conditions
+- Whether the issue is continuous or intermittent
+- Recent repairs or component replacements
+- Warning lights and related symptoms
+
+Avoid asking questions that are irrelevant to this complaint.
 
 2. INSPECTOR QUESTIONS
 
-Questions the inspector should ask or verify.
+List the important things the inspector must verify.
 
 3. PHYSICAL INSPECTION CHECKLIST
 
-Practical checks to perform on the vehicle.
+Give practical inspection steps.
 
 4. CONTROL MODULES TO SCAN
 
-Identify relevant modules such as:
+Recommend only relevant modules.
 
+Possible modules include:
 - Engine
 - Transmission
 - ABS / ESC
@@ -197,64 +289,64 @@ Identify relevant modules such as:
 - Battery / Charging
 - Hybrid / EV
 - TPMS
-- Other available OEM modules
-
-Only recommend modules relevant to the vehicle
-and complaint.
 
 5. LIVE DATA PARAMETERS
 
 Group parameters by module.
 
-Classify each parameter as:
-
+Classify each as:
 - Must Have
 - Optional
 - Vehicle Dependent
 
-IMPORTANT:
+For each parameter explain briefly why it is useful.
 
-Do not claim that a parameter is supported by the vehicle
-unless verified.
+Do not claim that the vehicle supports a parameter
+unless verified using the scanner.
 
-Label generic suggestions as scanner/vehicle dependent.
+6. PHYSICAL CONFIRMATION TESTS
 
-6. SAFETY PRECAUTIONS
+List tests needed to distinguish the most likely causes.
 
-Mention any safety precautions relevant to the inspection.
+7. SAFETY PRECAUTIONS
 
-Keep the plan practical for a mobile pre-purchase
-vehicle inspection.
+Mention relevant risks and safe inspection procedures.
+
+8. DIAGNOSTIC SEQUENCE
+
+Give the recommended order of work.
+
+Keep the plan practical for a mobile diagnostic
+and inspection service.
+
+Do not invent OEM specifications or readings.
 """
 
+
     response = client.responses.create(
-
         model=get_model(),
-
         instructions=SYSTEM_INSTRUCTIONS,
-
         input=prompt
-
     )
 
     return response.output_text
 
 
 # --------------------------------------------------
-# 7. PREPARE CSV DATA FOR AI
+# 8. PREPARE CSV DATA FOR AI
 # --------------------------------------------------
 
 def prepare_csv_context(module_data):
 
+    module_data = module_data or {}
+
     summary = build_csv_ai_summary(
-        module_data or {}
+        module_data
     )
 
     samples = []
 
-    for module, result in (
-        module_data or {}
-    ).items():
+    for module, result in module_data.items():
 
         csv_text = get_csv_text_for_ai(
             result,
@@ -265,8 +357,9 @@ def prepare_csv_context(module_data):
             f"""
 MODULE: {module}
 
-CSV DATA:
+FILE: {result.get("file_name", "Unknown")}
 
+CSV DATA:
 {csv_text}
 """
         )
@@ -275,60 +368,100 @@ CSV DATA:
 
 
 # --------------------------------------------------
-# 8. PREPARE IMAGE INPUT
+# 9. PREPARE IMAGE INPUT
 # --------------------------------------------------
 
 def prepare_image_content(image_files):
 
     content = []
 
-    for uploaded_image in (
-        image_files or []
-    )[:8]:
+    for uploaded_image in (image_files or [])[:8]:
 
         try:
 
             image_bytes = uploaded_image.getvalue()
 
+            if not image_bytes:
+                continue
+
             mime_type = (
-                getattr(
-                    uploaded_image,
-                    "type",
-                    None
-                )
+                getattr(uploaded_image, "type", None)
                 or mimetypes.guess_type(
-                    getattr(
-                        uploaded_image,
-                        "name",
-                        ""
-                    )
+                    getattr(uploaded_image, "name", "")
                 )[0]
                 or "image/jpeg"
             )
+
+            if mime_type not in [
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+                "image/gif"
+            ]:
+                continue
 
             encoded_image = base64.b64encode(
                 image_bytes
             ).decode("utf-8")
 
             content.append({
-
                 "type": "input_image",
-
                 "image_url": (
                     f"data:{mime_type};base64,{encoded_image}"
                 )
-
             })
 
         except Exception:
-
             continue
 
     return content
 
 
 # --------------------------------------------------
-# 9. COMPLETE VEHICLE DIAGNOSTIC ANALYSIS
+# 10. BUILD DATA QUALITY CONTEXT
+# --------------------------------------------------
+
+def build_data_quality_context(module_data):
+
+    output = []
+
+    for module, result in (module_data or {}).items():
+
+        quality = result.get(
+            "data_quality",
+            {}
+        )
+
+        required = result.get(
+            "required_parameters",
+            {}
+        )
+
+        output.append(
+            f"""
+MODULE: {module}
+
+Rows: {result.get("rows", 0)}
+
+Recognized parameters:
+{len(result.get("summary", {}))}
+
+Unmapped columns:
+{safe_text(result.get("unmapped", []))}
+
+Missing required parameters:
+{safe_text(required.get("missing", []))}
+
+Data quality information:
+{safe_text(quality)}
+"""
+        )
+
+    return "\n".join(output) or "No CSV data supplied."
+
+
+# --------------------------------------------------
+# 11. COMPLETE VEHICLE DIAGNOSTIC ANALYSIS
 # --------------------------------------------------
 
 def analyze_vehicle(
@@ -345,7 +478,13 @@ def analyze_vehicle(
 
     client = get_client()
 
+    module_data = module_data or {}
+
     csv_summary, csv_samples = prepare_csv_context(
+        module_data
+    )
+
+    data_quality = build_data_quality_context(
         module_data
     )
 
@@ -363,158 +502,214 @@ DOCTOR CAR - COMPLETE VEHICLE DIAGNOSTIC CASE
 2. CUSTOMER COMPLAINT
 ==================================================
 
-{complaint}
+{safe_text(complaint)}
 
 
 ==================================================
 3. INSPECTOR ANSWERS
 ==================================================
 
-{answers}
+{safe_text(answers)}
 
 
 ==================================================
 4. LIVE DATA SUMMARY
 ==================================================
 
-{csv_summary}
+{safe_text(csv_summary)}
 
 
 ==================================================
-5. RAW LIVE DATA SAMPLES
+5. LIVE DATA QUALITY
 ==================================================
 
-{csv_samples}
-
-
-==================================================
-6. DTC AND FULL SCAN INFORMATION
-==================================================
-
-{dtc_text}
+{data_quality}
 
 
 ==================================================
-7. FREEZE FRAME DATA
+6. RAW LIVE DATA SAMPLES
 ==================================================
 
-{freeze_frame_text}
-
-
-==================================================
-8. FULL SCAN PDF TEXT
-==================================================
-
-{scan_text}
+{safe_text(csv_samples)}
 
 
 ==================================================
-9. PHYSICAL INSPECTION NOTES
+7. DTC AND FULL SCAN INFORMATION
 ==================================================
 
-{physical_notes}
+{safe_text(dtc_text)}
 
 
 ==================================================
-10. REQUIRED DIAGNOSTIC REPORT
+8. FREEZE FRAME DATA
 ==================================================
 
-Prepare a professional evidence-based report
-with the following sections:
+{safe_text(freeze_frame_text)}
+
+
+==================================================
+9. FULL SCAN PDF TEXT
+==================================================
+
+{safe_text(scan_text)}
+
+
+==================================================
+10. PHYSICAL INSPECTION NOTES
+==================================================
+
+{safe_text(physical_notes)}
+
+
+==================================================
+11. REQUIRED DIAGNOSTIC REPORT
+==================================================
+
+Prepare a detailed, evidence-based diagnostic report
+using the following structure.
 
 A. EXECUTIVE SUMMARY
 
-Explain the overall inspection findings.
+Explain the main complaint and the most important findings.
 
 B. VEHICLE AND CUSTOMER COMPLAINT
 
-Summarize the vehicle and reported problem.
+Summarize vehicle details and reported symptoms.
 
-C. DATA QUALITY
+C. DATA QUALITY AND LIMITATIONS
 
 Explain:
-
 - Data received
-- Parameters identified
+- Recognized parameters
+- Missing required parameters
 - Missing readings
-- Unavailable parameters
-- Unsupported parameters
 - Unmapped scanner values
-- Limitations of the available data
+- Unavailable or unsupported parameters
+- Whether readings cover the relevant operating conditions
+- Limitations of the available evidence
+
+Do not treat missing data as a normal result.
 
 D. MODULE-BY-MODULE FINDINGS
 
-Analyze each available module separately.
+Analyze each supplied module separately.
+
+Do not assume that an unscanned module has no fault.
 
 E. DTC INTERPRETATION
 
-Explain the available trouble codes.
+For every supplied DTC explain:
+- Code and supplied description
+- Module
+- Status, if supplied
+- What the code actually indicates
+- Possible causes
+- What it does NOT prove
+- Recommended confirmation test
 
-Do not assume a DTC proves component failure.
+Never invent missing DTC descriptions.
 
-F. ROOT CAUSE POSSIBILITIES
+F. LIVE DATA ANALYSIS
 
-Rank possible causes according to evidence.
+For each relevant parameter explain:
+- Actual supplied readings
+- Units
+- Minimum / Maximum / Average where useful
+- Trend
+- Operating conditions
+- Whether the data is sufficient for a conclusion
 
-For every cause provide:
+Compare operating conditions only when the data supports
+a fair comparison.
+
+G. ROOT CAUSE ANALYSIS
+
+Rank the possible causes from most supported to least supported.
+
+For each cause include:
 
 - Finding classification
+- Explanation
 - Supporting evidence
 - Contradicting evidence
-- Confidence level
+- Missing evidence
 - What remains unverified
+- Next confirmation test
 
-G. NEXT DIAGNOSTIC TESTS
+Use qualitative confidence only:
+High / Medium / Low.
 
-Give the exact practical test sequence.
+Do not invent percentages.
 
-Explain what each test is intended to confirm.
+H. CONFIRMATION TEST PLAN
 
-H. REPAIR DIRECTION
+Give a practical step-by-step test sequence.
 
-Recommend repair direction only when evidence supports it.
+For every test explain:
+- What to inspect or measure
+- Why the test is needed
+- What result would support the suspected cause
+- What result would reject or weaken the suspected cause
 
-Do not guess parts.
+Use manufacturer procedures and specifications
+where available.
 
-I. SAFETY CONCERNS
+I. REPAIR DIRECTION
 
-Highlight safety-critical findings.
+Separate recommendations into:
 
-J. LIMITATIONS
+1. Confirmed repair
+2. Repair only after confirmation
+3. Further diagnosis required
 
-Clearly mention tests not performed
-and information not available.
+Do not recommend replacing parts without evidence.
 
-K. CUSTOMER-FRIENDLY CONCLUSION
+Where several causes remain possible, explain how
+to distinguish them before spending money.
 
-Explain the findings in simple professional language.
+J. SAFETY CONCERNS
 
-IMPORTANT:
+Highlight safety-critical findings and required precautions.
 
-Do not invent expected OEM readings.
+K. LIMITATIONS
 
-Do not calculate a numeric vehicle health score.
+Mention tests not performed and information not supplied.
 
-Do not interpret missing readings as zero.
+L. CUSTOMER-FRIENDLY CONCLUSION
 
-Do not claim No Fault Detected means
-that no fault exists.
+Explain the result in simple professional language.
 
-Use these finding classifications:
+M. FINAL DIAGNOSTIC STATUS
+
+Choose one:
 
 - Confirmed
 - Strongly Suspected
 - Possible
 - No Fault Detected
 - Further Diagnosis Required
+- Possible Tampering / Bypass
 
-Separate observations from interpretations.
+Explain why this status was selected.
 
-If evidence is insufficient, recommend further diagnosis.
+IMPORTANT FINAL RULES:
+
+- Separate facts from interpretations.
+- Do not invent readings or test results.
+- Do not invent OEM reference values.
+- Do not claim a test was performed if it was not.
+- Do not interpret missing readings as zero.
+- Do not claim No Fault Detected means no fault exists.
+- Do not confirm tampering from generic live data alone.
+- Do not recommend a part replacement solely from a DTC.
+- Do not create a numeric vehicle health score.
+- If evidence is insufficient, recommend further diagnosis.
 """
 
 
-    # Main AI text input
+    # --------------------------------------------------
+    # BUILD OPENAI INPUT
+    # --------------------------------------------------
 
     content = [
         {
@@ -523,33 +718,26 @@ If evidence is insufficient, recommend further diagnosis.
         }
     ]
 
-
-    # Add inspection photographs
-
     image_content = prepare_image_content(
         image_files
     )
 
-    content.extend(
-        image_content
-    )
+    content.extend(image_content)
 
 
-    # Send complete case to OpenAI
+    # --------------------------------------------------
+    # SEND COMPLETE CASE TO OPENAI
+    # --------------------------------------------------
 
     response = client.responses.create(
-
         model=get_model(),
-
         instructions=SYSTEM_INSTRUCTIONS,
-
         input=[
             {
                 "role": "user",
                 "content": content
             }
         ]
-
     )
 
     return response.output_text
