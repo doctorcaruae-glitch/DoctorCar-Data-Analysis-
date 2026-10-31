@@ -1,217 +1,537 @@
-import pandas as pd
-import numpy as np
+
+import io
 import re
-from io import BytesIO
+import pandas as pd
+
+from parameter_database import (
+    identify_parameter,
+    get_parameter_metadata
+)
 
 
-PARAMETER_ALIASES = {
-    "engine_rpm": [
-        "engine rpm", "rpm", "engine speed", "motor speed"
-    ],
-    "coolant_temp": [
-        "coolant temperature", "engine coolant temp",
-        "ect", "coolant temp"
-    ],
-    "engine_load": [
-        "engine load", "calculated load", "load value"
-    ],
-    "throttle_position": [
-        "throttle position", "absolute throttle position",
-        "throttle angle", "tps"
-    ],
-    "accelerator_position": [
-        "accelerator pedal position", "app sensor",
-        "accelerator position"
-    ],
-    "vehicle_speed": [
-        "vehicle speed", "speed"
-    ],
-    "maf": [
-        "maf", "mass air flow", "mass airflow"
-    ],
-    "map": [
-        "map", "manifold absolute pressure", "intake manifold pressure"
-    ],
-    "intake_air_temp": [
-        "intake air temperature", "iat"
-    ],
-    "fuel_pressure": [
-        "fuel pressure", "fuel rail pressure",
-        "rail pressure"
-    ],
-    "short_fuel_trim": [
-        "short term fuel trim", "stft"
-    ],
-    "long_fuel_trim": [
-        "long term fuel trim", "ltft"
-    ],
-    "o2_sensor": [
-        "oxygen sensor", "o2 sensor", "lambda"
-    ],
-    "ignition_timing": [
-        "ignition timing", "spark advance"
-    ],
-    "misfire": [
-        "misfire", "cylinder misfire"
-    ],
-    "boost_pressure": [
-        "boost pressure", "turbo pressure",
-        "desired boost", "actual boost"
-    ],
-    "egr": [
-        "egr", "exhaust gas recirculation"
-    ],
-    "dpf_pressure": [
-        "dpf differential pressure", "dpf pressure"
-    ],
-    "dpf_soot": [
-        "dpf soot", "soot mass", "particulate filter soot"
-    ],
-    "transmission_temp": [
-        "transmission temperature", "trans fluid temp",
-        "gearbox temperature"
-    ],
-    "current_gear": [
-        "current gear", "actual gear"
-    ],
-    "commanded_gear": [
-        "commanded gear", "desired gear", "target gear"
-    ],
-    "input_speed": [
-        "input shaft speed", "turbine speed"
-    ],
-    "output_speed": [
-        "output shaft speed"
-    ],
-    "tcc_slip": [
-        "torque converter slip", "tcc slip"
-    ],
-    "battery_voltage": [
-        "control module voltage", "battery voltage",
-        "ecu voltage", "module voltage"
-    ],
-    "wheel_speed": [
-        "wheel speed", "abs wheel speed"
-    ],
-    "steering_angle": [
-        "steering angle", "steering wheel angle"
+# --------------------------------------------------
+# 1. CLEAN AND CONVERT NUMERIC VALUES
+# --------------------------------------------------
+
+def clean_number(value):
+
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    if text.lower() in [
+        "n/a",
+        "na",
+        "null",
+        "none",
+        "--",
+        "-",
+        "not available",
+        "unsupported",
+        "not supported"
+    ]:
+        return None
+
+    text = text.replace(",", "")
+
+    match = re.search(
+        r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?",
+        text
+    )
+
+    if not match:
+        return None
+
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------
+# 2. READ CSV FILE
+# --------------------------------------------------
+
+def read_scanner_csv(file_bytes):
+
+    encodings = [
+        "utf-8-sig",
+        "utf-8",
+        "cp1252",
+        "latin1"
     ]
-}
+
+    separators = [
+        None,
+        ",",
+        ";",
+        "\t"
+    ]
+
+    for encoding in encodings:
+
+        for separator in separators:
+
+            try:
+
+                df = pd.read_csv(
+                    io.BytesIO(file_bytes),
+                    encoding=encoding,
+                    sep=separator,
+                    engine="python"
+                )
+
+                if len(df.columns) > 0:
+
+                    return df
+
+            except Exception:
+                continue
+
+    raise ValueError(
+        "Unable to read CSV. Please export the scanner CSV again."
+    )
 
 
-def normalize_name(name):
-    name = str(name).strip().lower()
-    name = re.sub(r"[^a-z0-9]+", " ", name)
-    return re.sub(r"\s+", " ", name).strip()
+# --------------------------------------------------
+# 3. IDENTIFY TIME COLUMN
+# --------------------------------------------------
 
+def find_time_column(columns):
 
-def identify_parameter(column_name):
-    normalized = normalize_name(column_name)
+    possible_names = [
+        "time",
+        "timestamp",
+        "date",
+        "record time",
+        "sample time"
+    ]
 
-    for standard_name, aliases in PARAMETER_ALIASES.items():
-        for alias in aliases:
-            if normalize_name(alias) in normalized:
-                return standard_name
+    for column in columns:
+
+        name = str(column).lower()
+
+        if any(item in name for item in possible_names):
+
+            return column
 
     return None
 
 
-def read_scanner_csv(uploaded_file):
-    raw = uploaded_file.getvalue()
+# --------------------------------------------------
+# 4. ANALYZE COLUMN-BASED CSV
+# --------------------------------------------------
 
-    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
-    separators = [None, ",", ";", "\t"]
-
-    last_error = None
-
-    for encoding in encodings:
-        for separator in separators:
-            try:
-                df = pd.read_csv(
-                    BytesIO(raw),
-                    encoding=encoding,
-                    sep=separator,
-                    engine="python",
-                    on_bad_lines="warn"
-                )
-
-                if not df.empty and len(df.columns) >= 1:
-                    df.columns = [
-                        str(c).strip() for c in df.columns
-                    ]
-                    return df
-
-            except Exception as error:
-                last_error = error
-
-    raise ValueError(
-        f"Unable to read CSV file: {last_error}"
-    )
-
-
-def analyze_csv(uploaded_file):
-    df = read_scanner_csv(uploaded_file)
+def analyze_column_data(df):
 
     detected = {}
+
     unmapped = []
 
+    summary = {}
+
+    time_column = find_time_column(df.columns)
+
     for column in df.columns:
-        standard = identify_parameter(column)
 
-        if standard:
-            detected.setdefault(standard, []).append(column)
-        else:
-            unmapped.append(column)
+        parameter_key = identify_parameter(column)
 
-    parameter_summary = []
+        if parameter_key:
 
-    for standard, columns in detected.items():
-        for column in columns:
-            series = df[column]
+            detected[column] = parameter_key
 
-            numeric = pd.to_numeric(
-                series.astype(str).str.replace(",", ""),
-                errors="coerce"
+            metadata = get_parameter_metadata(
+                parameter_key
             )
 
-            valid = numeric.dropna()
+            values = df[column].apply(
+                clean_number
+            ).dropna()
 
-            parameter_summary.append({
-                "parameter": standard,
+            summary[parameter_key] = {
+
                 "source_column": column,
-                "unit_or_format": "",
-                "valid_readings": int(valid.count()),
-                "missing_readings": int(numeric.isna().sum()),
-                "minimum": (
-                    float(valid.min()) if not valid.empty else None
+
+                "label": metadata.get(
+                    "label",
+                    parameter_key
                 ),
-                "maximum": (
-                    float(valid.max()) if not valid.empty else None
+
+                "unit": metadata.get(
+                    "unit",
+                    ""
                 ),
+
+                "module": metadata.get(
+                    "module",
+                    "Unknown"
+                ),
+
+                "valid_count": int(
+                    len(values)
+                ),
+
+                "missing_count": int(
+                    len(df) - len(values)
+                ),
+
+                "min": (
+                    float(values.min())
+                    if len(values) else None
+                ),
+
+                "max": (
+                    float(values.max())
+                    if len(values) else None
+                ),
+
                 "average": (
-                    float(valid.mean()) if not valid.empty else None
+                    float(values.mean())
+                    if len(values) else None
                 ),
+
                 "latest": (
-                    float(valid.iloc[-1]) if not valid.empty else None
+                    float(values.iloc[-1])
+                    if len(values) else None
                 )
-            })
+
+            }
+
+        elif column != time_column:
+
+            unmapped.append(column)
 
     return {
-        "dataframe": df,
-        "rows": len(df),
-        "columns": list(df.columns),
         "detected": detected,
         "unmapped": unmapped,
-        "summary": parameter_summary
+        "summary": summary,
+        "time_column": time_column
     }
 
 
-def get_csv_text_for_ai(result, max_rows=300):
-    df = result["dataframe"].copy()
+# --------------------------------------------------
+# 5. ANALYZE ROW-BASED CSV
+# --------------------------------------------------
 
-    # Limit data sent to AI to control token usage.
-    if len(df) > max_rows:
-        step = max(1, len(df) // max_rows)
-        df = df.iloc[::step].head(max_rows)
+def analyze_row_data(df):
 
-    return df.to_csv(index=False)
+    if len(df.columns) < 2:
+
+        return {
+            "detected": {},
+            "unmapped": list(df.columns),
+            "summary": {},
+            "time_column": None
+        }
+
+    name_column = None
+
+    value_column = None
+
+    for column in df.columns:
+
+        name = str(column).lower()
+
+        if any(word in name for word in [
+            "parameter",
+            "name",
+            "pid",
+            "item"
+        ]):
+
+            name_column = column
+
+        if any(word in name for word in [
+            "value",
+            "reading",
+            "data"
+        ]):
+
+            value_column = column
+
+    if name_column is None:
+        name_column = df.columns[0]
+
+    if value_column is None:
+        value_column = df.columns[1]
+
+    detected = {}
+
+    summary = {}
+
+    for _, row in df.iterrows():
+
+        parameter_name = row.get(
+            name_column,
+            ""
+        )
+
+        parameter_key = identify_parameter(
+            parameter_name
+        )
+
+        if not parameter_key:
+            continue
+
+        value = clean_number(
+            row.get(value_column)
+        )
+
+        metadata = get_parameter_metadata(
+            parameter_key
+        )
+
+        detected[str(parameter_name)] = parameter_key
+
+        summary[parameter_key] = {
+
+            "source_column": (
+                str(name_column)
+                + " -> "
+                + str(value_column)
+            ),
+
+            "label": metadata.get(
+                "label",
+                parameter_key
+            ),
+
+            "unit": metadata.get(
+                "unit",
+                ""
+            ),
+
+            "module": metadata.get(
+                "module",
+                "Unknown"
+            ),
+
+            "valid_count": (
+                1 if value is not None else 0
+            ),
+
+            "missing_count": (
+                0 if value is not None else 1
+            ),
+
+            "min": value,
+            "max": value,
+            "average": value,
+            "latest": value
+
+        }
+
+    unmapped = [
+        column
+        for column in df.columns
+        if column not in [
+            name_column,
+            value_column
+        ]
+    ]
+
+    return {
+        "detected": detected,
+        "unmapped": unmapped,
+        "summary": summary,
+        "time_column": None
+    }
+
+
+# --------------------------------------------------
+# 6. MAIN CSV ANALYZER
+# --------------------------------------------------
+
+def analyze_csv(uploaded_file):
+
+    if hasattr(uploaded_file, "getvalue"):
+
+        file_bytes = uploaded_file.getvalue()
+
+    else:
+
+        file_bytes = uploaded_file.read()
+
+    df = read_scanner_csv(file_bytes)
+
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    column_result = analyze_column_data(df)
+
+    # First try column-based structure.
+
+    result = column_result
+
+    # If no parameters were identified,
+    # try row-based structure.
+
+    if not result["summary"]:
+
+        row_result = analyze_row_data(df)
+
+        if row_result["summary"]:
+
+            result = row_result
+
+    return {
+
+        "dataframe": df,
+
+        "rows": int(len(df)),
+
+        "columns": list(df.columns),
+
+        "detected": result["detected"],
+
+        "unmapped": result["unmapped"],
+
+        "summary": result["summary"],
+
+        "time_column": result["time_column"],
+
+        "file_name": getattr(
+            uploaded_file,
+            "name",
+            "uploaded.csv"
+        ),
+
+        "data_quality": {
+
+            "row_count": int(len(df)),
+
+            "recognized_parameter_count": len(
+                result["summary"]
+            ),
+
+            "unmapped_columns": result["unmapped"],
+
+            "time_column": (
+                str(result["time_column"])
+                if result["time_column"]
+                else None
+            )
+
+        }
+
+    }
+
+
+# --------------------------------------------------
+# 7. CONVERT CSV DATA FOR AI
+# --------------------------------------------------
+
+def get_csv_text_for_ai(
+    result,
+    max_rows=250
+):
+
+    df = result.get("dataframe")
+
+    if df is None:
+
+        return "No CSV data available."
+
+    safe_df = df.head(max_rows).copy()
+
+    return safe_df.to_csv(
+        index=False
+    )
+
+
+# --------------------------------------------------
+# 8. BUILD MULTI-MODULE AI SUMMARY
+# --------------------------------------------------
+
+def build_csv_ai_summary(module_results):
+
+    output = []
+
+    for module, result in (
+        module_results or {}
+    ).items():
+
+        output.append(
+            "\nMODULE: " + str(module)
+        )
+
+        output.append(
+            "File: "
+            + str(
+                result.get(
+                    "file_name",
+                    "Unknown"
+                )
+            )
+        )
+
+        output.append(
+            "Rows: "
+            + str(
+                result.get(
+                    "rows",
+                    0
+                )
+            )
+        )
+
+        output.append(
+            "Recognized parameters: "
+            + str(
+                len(
+                    result.get(
+                        "summary",
+                        {}
+                    )
+                )
+            )
+        )
+
+        for key, item in result.get(
+            "summary",
+            {}
+        ).items():
+
+            output.append(
+
+                "- "
+                + str(
+                    item.get(
+                        "label",
+                        key
+                    )
+                )
+                + ": Latest="
+                + str(item.get("latest"))
+                + " "
+                + str(item.get("unit", ""))
+                + "; Minimum="
+                + str(item.get("min"))
+                + "; Maximum="
+                + str(item.get("max"))
+                + "; Valid readings="
+                + str(item.get("valid_count"))
+                + "; Missing readings="
+                + str(item.get("missing_count"))
+
+            )
+
+        if result.get("unmapped"):
+
+            output.append(
+                "Unmapped columns: "
+                + ", ".join(
+                    map(
+                        str,
+                        result["unmapped"][:30]
+                    )
+                )
+            )
+
+    return "\n".join(output)
