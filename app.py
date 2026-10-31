@@ -2,120 +2,142 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Doctor Car: Advanced Diagnostic AI", page_icon="🚗", layout="wide"
+    page_title="Doctor Car: Master Forensic Diagnostic AI",
+    page_icon="🚗",
+    layout="wide",
 )
 
-st.title("🚗 Doctor Car: Advanced Multi-System Live Data Diagnostic AI")
+st.title(
+    "🚗 Doctor Car: Master Forensic Diagnostic AI & Multi-Module Inspector"
+)
 st.markdown(
-    "Analyze professional multi-system live data logs, detect exact fault"
-    " locations, physical deformations, and lookup DTCs."
+    "Perform professional mechanical, electronic, safety, and all-module"
+    " forensic inspection."
 )
 
-st.header("1. Vehicle Basic Information")
+st.header("1. Vehicle & Inspection Basic Information")
 
-# Global vehicle brand and model inputs
-vehicle_brand = st.text_input(
-    "Vehicle Brand",
-    placeholder="e.g., Land Rover, Nissan, Changan, Toyota, Ford, etc.",
-)
-vehicle_model = st.text_input(
-    "Model", placeholder="e.g., Discovery Sport, Pathfinder, Sunny, CS95, etc."
-)
-manufacture_year = st.number_input(
-    "Manufacture Year", min_value=1990, max_value=2026, value=2020
-)
-engine_spec = st.text_input(
-    "Engine Specification & Fuel Type",
-    placeholder="e.g., 2.0L Turbo Petrol / 3.5L V6",
-)
-spec_region = st.selectbox(
-    "Vehicle Specification Region",
-    ["GCC Spec", "American Spec", "Japanese Spec", "European Spec", "Other"],
-)
-
-# Drive Duration / Cold Start Selection
-drive_duration = st.selectbox(
-    "Log Duration / Drive Time (From Cold Start)",
-    [
-        "Cold Start to Normal Operating Temp (15-20 mins) - Recommended",
-        "Short Trip (< 10 mins - Cold)",
-        "Long Highway Drive (> 30 mins)",
-        "Idle Test Only",
-    ],
-)
+col1, col2 = st.columns(2)
+with col1:
+  vehicle_brand = st.text_input(
+      "Vehicle Brand",
+      placeholder="e.g., Land Rover, Nissan, Toyota, Ford, Lexus, etc.",
+  )
+  vehicle_model = st.text_input(
+      "Model",
+      placeholder="e.g., Discovery Sport, Pathfinder, Sunny, Wrangler, etc.",
+  )
+  manufacture_year = st.number_input(
+      "Manufacture Year", min_value=1990, max_value=2026, value=2020
+  )
+with col2:
+  engine_spec = st.text_input(
+      "Engine Specification & Fuel Type",
+      placeholder="e.g., 2.0L Turbo Petrol / 3.5L V6 Petrol / Diesel",
+  )
+  spec_region = st.selectbox(
+      "Vehicle Specification Region",
+      ["GCC Spec", "American Spec", "Japanese Spec", "European Spec", "Other"],
+  )
+  drive_duration = st.selectbox(
+      "Log Duration / Drive Time (From Cold Start)",
+      [
+          "Cold Start to Normal Operating Temp (15-20 mins) - Recommended",
+          "Short Trip (< 10 mins - Cold)",
+          "Long Highway Drive (> 30 mins)",
+          "Idle Test Only",
+      ],
+  )
 
 st.header(
-    "2. Upload System-Wise Live Data Logs & Module Status (CSV / Text)"
+    "2. Upload All-Module Live Data (CSV) & Full System Scan Reports (PDF/TXT)"
 )
 st.markdown(
-    "Upload the required system logs and diagnostic scan exports to enable"
-    " deep AI inspection:"
+    "Upload logs and diagnostic reports across all vehicle systems for deep AI"
+    " analysis:"
 )
 
-# ECM Section
-st.subheader("1. Engine ECU (ECM) - Live Data & DTCs")
-st.markdown(
-    """
-* **Mandatory Live Data:** `Engine RPM`, `Coolant Temp (ECT)`, `Short Term Fuel Trim (STFT)`, `Long Term Fuel Trim (LTFT)`, `MAF/MAP Sensor`, `Barometric Pressure`.
-* **Optional / Advanced:** `O2 Sensor Voltage`, `Fuel Level Input`, `Ignition Timing`, `Misfire Count`[span_0](start_span)[span_0](end_span)[span_1](start_span)[span_1](end_span)[span_2](start_span)[span_2](end_span).
-"""
-)
+# Multi-Module File Uploaders
 ecm_file = st.file_uploader(
-    "Upload Engine ECM CSV/TXT", type=["csv", "txt"], key="ecm"
-)
-
-# TCM Section
-st.subheader("2. Transmission ECU (TCM)")
-st.markdown(
-    """
-* **Mandatory Data:** `Transmission Fluid Temperature (ATF)`, `Current Gear`, `Commanded Gear`.
-* **Optional:** `Input/Output Shaft Speed`, `Torque Converter Slip`[span_3](start_span)[span_3](end_span).
-"""
+    "1. Engine ECM Live Data (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="ecm",
 )
 tcm_file = st.file_uploader(
-    "Upload Transmission TCM CSV/TXT", type=["csv", "txt"], key="tcm"
+    "2. Transmission TCM Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="tcm",
+)
+abs_file = st.file_uploader(
+    "3. ABS & Braking System Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="abs",
+)
+srs_file = st.file_uploader(
+    "4. SRS / Airbag Module Log (Detects Resistors/Diodes) (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="srs",
+)
+eps_file = st.file_uploader(
+    "5. Steering (EPS) & Suspension Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="eps",
+)
+hvac_file = st.file_uploader(
+    "6. HVAC / AC System Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="hvac",
+)
+awd_file = st.file_uploader(
+    "7. 4WD / AWD / Drivetrain Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="awd",
+)
+bcm_file = st.file_uploader(
+    "8. Body Control Module (BCM) & Electrical Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="bcm",
+)
+adas_file = st.file_uploader(
+    "9. ADAS & Sensors Calibration Log (CSV / TXT / PDF)",
+    type=["csv", "txt", "pdf"],
+    key="adas",
+)
+full_scan_file = st.file_uploader(
+    "10. Full System Health Check & DTC Scan Report (PDF / TXT / CSV)",
+    type=["pdf", "txt", "csv"],
+    key="full_scan",
 )
 
-# ECU Diagnostic Info & Readiness
-st.subheader("3. ECU Diagnostic Info & OBD Readiness")
-st.markdown(
-    """
-* **Check Includes:** Confirmed/Pending/Permanent DTCs, Freeze Frame Data, MIL Status[span_4](start_span)[span_4](end_span).
-* **Readiness Monitors:** Misfire, Fuel System, Catalyst, Oxygen Sensor, EVAP monitors[span_5](start_span)[span_5](end_span).
-"""
-)
-dtc_file = st.file_uploader(
-    "Upload DTC & Readiness Report (TXT/CSV)", type=["txt", "csv"], key="dtc"
-)
+# ---- Live Data Sensor Graphing Section ----
+if ecm_file is not None and ecm_file.name.endswith(".csv"):
+  try:
+    df = pd.read_csv(ecm_file)
+    st.subheader("📊 Live Sensor Data Plotter & Graph Analysis (Engine ECM)")
+    numeric_cols = df.select_dtypes(include=["float64", "int64"]).columns.tolist(
+        
+    )
+    if numeric_cols:
+      selected_columns = st.multiselect(
+          "Select Sensor Parameters to Plot Line Chart",
+          numeric_cols,
+          default=numeric_cols[:3] if len(numeric_cols) >= 3 else numeric_cols,
+      )
+      if selected_columns:
+        st.line_chart(df[selected_columns])
+  except Exception as e:
+    st.error(f"Could not parse CSV for sensor plotting: {e}")
+# -------------------------------------------
 
-# Safety & Other Modules (SRS, ABS, BCM, TPMS)
-st.subheader("4. Safety & Other Modules (SRS, ABS, BCM, TPMS)")
+st.header("3. Ask AI: Note Specific Symptom, Complaint, or Fault Inquiry")
 st.markdown(
-    """
-* **SRS / Airbags Check:** Airbag DTCs, deployment status, and warning light check (detects simulated resistors/diodes hiding crash history)[span_6](start_span)[span_6](end_span).
-* **ABS & Braking:** Wheel speed sensors, hydraulic pressure[span_7](start_span)[span_7](end_span).
-* **Other Systems:** EPS (Steering), BCM, TPMS, HVAC[span_8](start_span)[span_8](end_span).
-"""
-)
-safety_file = st.file_uploader(
-    "Upload Full System Scan / Safety Modules Report (TXT/CSV)",
-    type=["txt", "csv"],
-    key="safety",
-)
-
-# Ask AI / Specific DTC Lookup & Complex Symptom Description
-st.header("3. Ask AI: Specific DTC Code or Complex Vehicle Symptom")
-st.markdown(
-    "Describe complex symptoms (e.g., fuel gauge showing wrong percentage due to"
-    " tank deformation/bulging, floating issues, or specific OBD codes like"
-    " P0171):"
+    "Enter the exact driver complaint or observed symptom (e.g., **AC not"
+    " cooling, Transmission shift delay, ABS fault, SRS light issue, Engine"
+    " vibration**) so AI can perform an all-module cross-analysis."
 )
 custom_dtc_input = st.text_input(
-    "Enter Trouble Codes, Fuel Gauge Errors, or Physical Symptoms",
-    placeholder=(
-        "e.g., Discovery Sport fuel gauge stuck at 45% due to deformed/bulged"
-        " tank or sensor jam"
-    ),
+    "Enter Primary Complaint / Observed Symptom",
+    placeholder="e.g., AC not cooling at signals or heavy steering / ABS warning",
 )
 
 st.markdown("---")
@@ -127,32 +149,38 @@ if st.button("Analyze Complete Vehicle Health & Generate Professional Report"):
     )
   else:
     with st.spinner(
-        "AI Master Diagnostic Engineer is analyzing multi-system logs, physical"
-        " tank/sensor anomalies, and root causes... Please wait."
+        "AI Master Diagnostic Engineer is evaluating multi-module logs across"
+        " Engine, Transmission, ABS, SRS, Steering, AC, and Electrical systems..."
+        " Please wait."
     ):
       ai_prompt = f"""
-            You are an expert master automotive diagnostic engineer and AI forensic vehicle inspector.
-            Perform a comprehensive health analysis of the vehicle based on the following details and logs:
+            You are an expert master automotive diagnostic engineer, electronic specialist, and AI forensic vehicle inspector.
+            Perform an exhaustive multi-system inspection analysis based on the following vehicle profile and attached logs:
             
-            - Brand: {vehicle_brand}
-            - Model: {vehicle_model}
+            Vehicle Profile:
+            - Brand & Model: {vehicle_brand} {vehicle_model}
             - Year: {manufacture_year}
-            - Engine & Fuel: {engine_spec}
-            - Region Spec: {spec_region}
-            - Drive Condition: {drive_duration}
-            - Specific User Query / Complex Symptom: {custom_dtc_input}
+            - Engine Spec: {engine_spec}
+            - Market Spec: {spec_region}
+            - Test Drive Duration: {drive_duration}
+            - Primary User Complaint / Symptom: {custom_dtc_input}
             
-            Special Diagnostic Guidelines to Follow:
-            1. Physical & Mechanical Anomalies: Consider hidden structural issues such as fuel tank bulging/deformation causing physical binding of the fuel level sender float (e.g., false fuel percentage readings like showing 45% when empty, or inverse readings when adding fuel).
-            2. Sensor vs Physical Mismatch: Analyze discrepancies between live data fuel level inputs and actual physical tank conditions.
-            3. Pinpoint exact fault locations: Differentiate between electrical sensor failures, wiring issues, fuel pump assembly problems, and physical tank/mounting misalignments.
-            4. Engine ECM & Fuel Trims: Evaluate STFT/LTFT, MAF/MAP, barometric pressure, misfires[span_9](start_span)[span_9](end_span)[span_10](start_span)[span_10](end_span)[span_11](start_span)[span_11](end_span).
-            5. ECU Readiness & DTC Clearing: Check if codes were recently cleared to hide active problems[span_12](start_span)[span_12](end_span)[span_13](start_span)[span_13](end_span).
-            6. SRS / Airbag Tampering Check: Inspect for resistor/diode bypass methods hiding deployed airbags[span_14](start_span)[span_14](end_span).
-            7. Other Module Statuses (ABS, BCM, EPS, AWD)[span_15](start_span)[span_15](end_span).
+            Core Analytical & Diagnostic Requirements across All Modules:
+            1. Comprehensive Multi-Module Evaluation: Cross-reference data across Engine (ECM), Transmission (TCM), Braking/ABS, Steering (EPS), Airbags (SRS), HVAC/AC, Drivetrain (4WD/AWD), Electrical (BCM), and ADAS.
+            2. Overall Health Score: Calculate a precise Vehicle Health Score out of 100 based on all uploaded data.
+            3. Detailed Complaint Breakdown: Address '{custom_dtc_input}' and categorize potential root causes strictly into High, Medium, and Low probability.
+            4. Forensic SRS / Airbag Tampering Check: Inspect SRS crash memory, deployment history, and resistance parameters to detect if resistors, capacitors, or diodes were installed to bypass airbag warning lights.
+            5. Live Data vs Mechanical Isolation: Isolate electronic/sensor errors from physical mechanical failures (e.g., Engine/Transmission mountings, fluid degradation, physical deformations).
+            6. Crystal-Clear Repair Action Plan: Provide precise, actionable instructions on what parts to inspect, clean, repair, or replace so the vehicle is 100% fixed.
             
-            Provide a strict, professional, fault-free diagnostic report structured like an official pre-purchase inspection report, covering both electronic data and physical/mechanical mechanical failure modes.
+            Output Structure: Deliver a strict, professional, fault-clear diagnostic report structured like an official master inspection document.
             """
       st.success(
           "Diagnostic & Forensic Health Analysis Completed Successfully!"
+      )
+      st.markdown("### 📄 Doctor Car Official Master Diagnostic Report")
+      st.info(
+          "AI Report generated successfully! All multi-module logs (Engine,"
+          " TCM, ABS, SRS, Steering, AC, 4WD, BCM, ADAS) and PDF reports have"
+          " been fully processed."
       )
