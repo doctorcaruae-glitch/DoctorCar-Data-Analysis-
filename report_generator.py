@@ -1,16 +1,29 @@
+"""
+Doctor Car - Professional PDF Report Generator
 
-import os
+Features:
+- English-only customer-facing reports
+- Navy and gold corporate theme
+- Vehicle and customer details
+- Evidence-based diagnostic findings
+- Confirmed / Suspected / Possible status separation
+- Recommended tests and limitations
+- PDF returned as bytes
+
+Uses ReportLab Platypus.
+"""
+
+import io
 import re
-from io import BytesIO
+import os
 from datetime import datetime
-from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import (
     getSampleStyleSheet,
-    ParagraphStyle
+    ParagraphStyle,
 )
 from reportlab.lib.units import mm
 from reportlab.platypus import (
@@ -19,624 +32,268 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
-    KeepTogether
+    HRFlowable,
+    KeepTogether,
 )
-from reportlab.lib.colors import HexColor
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 
-# ==================================================
-# DOCTOR CAR BRAND COLORS
-# ==================================================
+# =========================================================
+# 1. BRAND SETTINGS
+# =========================================================
 
-NAVY = HexColor("#102B4E")
-DARK_NAVY = HexColor("#091D35")
-GOLD = HexColor("#D6A84F")
-LIGHT_BLUE = HexColor("#EAF1F8")
-LIGHT_GREY = HexColor("#F3F5F7")
-DARK_GREY = HexColor("#454F5B")
-BORDER = HexColor("#D5DCE4")
+NAVY = colors.HexColor("#102B50")
+DARK_NAVY = colors.HexColor("#0A1D35")
+GOLD = colors.HexColor("#C9A34E")
+LIGHT_GOLD = colors.HexColor("#F5EEDC")
+LIGHT_BLUE = colors.HexColor("#EAF0F7")
+LIGHT_GREY = colors.HexColor("#F3F5F7")
+DARK_GREY = colors.HexColor("#333333")
+MID_GREY = colors.HexColor("#687386")
 WHITE = colors.white
 
+COMPANY_NAME = "DOCTOR CAR"
 
-# ==================================================
-# FONT SUPPORT
-# ==================================================
+COMPANY_TAGLINE = (
+    "Professional Pre-Purchase Vehicle Inspection"
+)
 
-FONT_REGULAR = "Helvetica"
-FONT_BOLD = "Helvetica-Bold"
-
-
-def register_custom_fonts():
-
-    """
-    Optional Unicode font support.
-
-    Add font files to the repository later if required.
-    """
-
-    global FONT_REGULAR, FONT_BOLD
-
-    font_files = [
-        (
-            "DoctorCarRegular",
-            "DejaVuSans.ttf"
-        ),
-        (
-            "DoctorCarBold",
-            "DejaVuSans-Bold.ttf"
-        )
-    ]
-
-    registered = {}
-
-    for font_name, font_path in font_files:
-
-        if os.path.exists(font_path):
-
-            try:
-
-                pdfmetrics.registerFont(
-                    TTFont(font_name, font_path)
-                )
-
-                registered[font_name] = True
-
-            except Exception:
-                pass
-
-    if "DoctorCarRegular" in registered:
-        FONT_REGULAR = "DoctorCarRegular"
-
-    if "DoctorCarBold" in registered:
-        FONT_BOLD = "DoctorCarBold"
+COMPANY_FOOTER = (
+    "Doctor Car | Professional Automotive Inspection | UAE"
+)
 
 
-register_custom_fonts()
+# =========================================================
+# 2. TEXT HELPERS
+# =========================================================
 
-
-# ==================================================
-# TEXT HELPERS
-# ==================================================
-
-def safe_text(value, default="N/A"):
+def safe_text(value, default="Not provided"):
 
     if value is None:
         return default
 
     text = str(value).strip()
 
+    return text if text else default
+
+
+def escape_xml(value):
+
+    text = safe_text(value)
+
+    text = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+    return text
+
+
+def clean_report_text(value):
+
+    """
+    Convert Markdown-like AI output into readable report text.
+    This is formatting only; it does not verify diagnostic claims.
+    """
+
+    text = safe_text(value, "")
+
     if not text:
-        return default
+        return "No diagnostic information provided."
 
-    return escape(text).replace("\n", "<br/>")
+    text = text.replace("\r\n", "\n")
+
+    text = re.sub(
+        r"```.*?```",
+        "",
+        text,
+        flags=re.DOTALL
+    )
+
+    return text.strip()
 
 
-def markdown_to_reportlab(text):
+def parse_markdown_line(line):
 
-    """
-    Convert basic Markdown into ReportLab-compatible text.
-    """
+    line = line.strip()
 
-    if text is None:
-        return ""
+    if not line:
+        return None
 
-    text = escape(str(text))
+    if line.startswith("# "):
+        return "heading", line[2:].strip()
 
-    # Bold
+    if line.startswith("## "):
+        return "subheading", line[3:].strip()
+
+    if line.startswith("### "):
+        return "minor_heading", line[4:].strip()
+
+    if line.startswith("- ") or line.startswith("* "):
+        return "bullet", line[2:].strip()
+
+    if re.match(r"^\d+\.\s+", line):
+        return "number", re.sub(r"^\d+\.\s+", "", line)
+
+    return "paragraph", line
+
+
+def format_inline_markdown(text):
+
+    text = escape_xml(text)
+
     text = re.sub(
         r"\*\*(.*?)\*\*",
         r"<b>\1</b>",
         text
     )
 
-    # Italic
     text = re.sub(
-        r"(?<!\*)\*([^*]+)\*(?!\*)",
+        r"\*(.*?)\*",
         r"<i>\1</i>",
-        text
-    )
-
-    # Inline code
-    text = re.sub(
-        r"`([^`]+)`",
-        r"<font name='Courier'>\1</font>",
         text
     )
 
     return text
 
 
-# ==================================================
-# REPORT STYLES
-# ==================================================
+# =========================================================
+# 3. STYLES
+# =========================================================
 
-def create_styles():
+def build_styles():
 
     styles = getSampleStyleSheet()
 
     styles.add(
         ParagraphStyle(
-            name="DoctorCarTitle",
-            fontName=FONT_BOLD,
+            name="DoctorTitle",
+            parent=styles["Title"],
+            fontName="Helvetica-Bold",
             fontSize=25,
             leading=30,
             textColor=NAVY,
             alignment=TA_CENTER,
-            spaceAfter=2 * mm
+            spaceAfter=4 * mm,
         )
     )
 
     styles.add(
         ParagraphStyle(
-            name="DoctorCarSubtitle",
-            fontName=FONT_REGULAR,
+            name="DoctorTagline",
+            parent=styles["Normal"],
+            fontName="Helvetica",
             fontSize=9,
             leading=13,
-            textColor=DARK_GREY,
+            textColor=MID_GREY,
             alignment=TA_CENTER,
-            spaceAfter=2 * mm
+            spaceAfter=5 * mm,
         )
     )
 
     styles.add(
         ParagraphStyle(
-            name="SectionHeading",
-            fontName=FONT_BOLD,
-            fontSize=11,
-            leading=15,
+            name="DoctorSection",
+            parent=styles["Heading2"],
+            fontName="Helvetica-Bold",
+            fontSize=12,
+            leading=16,
             textColor=NAVY,
             spaceBefore=5 * mm,
-            spaceAfter=2.5 * mm,
-            keepWithNext=True
+            spaceAfter=2 * mm,
+            keepWithNext=True,
         )
     )
 
     styles.add(
         ParagraphStyle(
-            name="SubHeading",
-            fontName=FONT_BOLD,
-            fontSize=9,
-            leading=12,
-            textColor=NAVY,
+            name="DoctorSubheading",
+            parent=styles["Heading3"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=13,
+            textColor=DARK_NAVY,
             spaceBefore=3 * mm,
             spaceAfter=1.5 * mm,
-            keepWithNext=True
+            keepWithNext=True,
         )
     )
 
     styles.add(
         ParagraphStyle(
-            name="BodyTextCustom",
-            fontName=FONT_REGULAR,
-            fontSize=8.5,
-            leading=12,
+            name="DoctorBody",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=8.8,
+            leading=13,
             textColor=DARK_GREY,
-            spaceAfter=2 * mm
+            spaceAfter=2 * mm,
         )
     )
 
     styles.add(
         ParagraphStyle(
-            name="SmallTextCustom",
-            fontName=FONT_REGULAR,
-            fontSize=7,
-            leading=10,
-            textColor=DARK_GREY
-        )
-    )
-
-    styles.add(
-        ParagraphStyle(
-            name="BulletCustom",
-            fontName=FONT_REGULAR,
-            fontSize=8.5,
-            leading=12,
-            leftIndent=10,
-            firstLineIndent=-7,
-            textColor=DARK_GREY,
-            spaceAfter=1.5 * mm
-        )
-    )
-
-    styles.add(
-        ParagraphStyle(
-            name="TableHeaderCustom",
-            fontName=FONT_BOLD,
+            name="DoctorSmall",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
             fontSize=7.5,
             leading=10,
-            textColor=WHITE
+            textColor=MID_GREY,
         )
     )
 
     styles.add(
         ParagraphStyle(
-            name="TableCellCustom",
-            fontName=FONT_REGULAR,
-            fontSize=7.2,
-            leading=10,
-            textColor=DARK_GREY
+            name="DoctorBullet",
+            parent=styles["BodyText"],
+            fontName="Helvetica",
+            fontSize=8.5,
+            leading=12,
+            leftIndent=12,
+            firstLineIndent=-8,
+            textColor=DARK_GREY,
+            spaceAfter=1.5 * mm,
+        )
+    )
+
+    styles.add(
+        ParagraphStyle(
+            name="DoctorStatus",
+            parent=styles["BodyText"],
+            fontName="Helvetica-Bold",
+            fontSize=8,
+            leading=11,
+            textColor=NAVY,
+        )
+    )
+
+    styles.add(
+        ParagraphStyle(
+            name="DoctorWhite",
+            parent=styles["BodyText"],
+            fontName="Helvetica-Bold",
+            fontSize=9,
+            leading=12,
+            textColor=WHITE,
         )
     )
 
     return styles
 
 
-# ==================================================
-# VEHICLE INFORMATION TABLE
-# ==================================================
-
-def create_vehicle_table(
-    vehicle,
-    customer_name,
-    customer_phone,
-    complaint,
-    report_id
-):
-
-    vehicle = vehicle or {}
-
-    styles = create_styles()
-
-    rows = [
-        [
-            "Report ID",
-            safe_text(report_id),
-            "Report Date",
-            datetime.now().strftime("%d %b %Y")
-        ],
-        [
-            "Customer",
-            safe_text(customer_name),
-            "Phone",
-            safe_text(customer_phone)
-        ],
-        [
-            "Make",
-            safe_text(vehicle.get("make")),
-            "Model",
-            safe_text(vehicle.get("model"))
-        ],
-        [
-            "Year",
-            safe_text(vehicle.get("year")),
-            "Mileage",
-            safe_text(vehicle.get("mileage"))
-        ],
-        [
-            "VIN",
-            safe_text(vehicle.get("vin")),
-            "Specification",
-            safe_text(vehicle.get("specification"))
-        ],
-        [
-            "Fuel Type",
-            safe_text(vehicle.get("fuel_type")),
-            "Transmission",
-            safe_text(vehicle.get("transmission"))
-        ],
-        [
-            "Engine",
-            safe_text(
-                vehicle.get("engine")
-                or vehicle.get("engine_capacity")
-            ),
-            "Engine Code",
-            safe_text(vehicle.get("engine_code"))
-        ],
-        [
-            "Drivetrain",
-            safe_text(vehicle.get("drivetrain")),
-            "Engine Power",
-            safe_text(vehicle.get("engine_power"))
-        ],
-        [
-            "Customer Complaint",
-            Paragraph(
-                safe_text(complaint),
-                styles["TableCellCustom"]
-            ),
-            "",
-            ""
-        ]
-    ]
-
-    table = Table(
-        rows,
-        colWidths=[
-            30 * mm,
-            50 * mm,
-            30 * mm,
-            50 * mm
-        ]
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (0, -1), LIGHT_BLUE),
-            ("BACKGROUND", (2, 0), (2, -1), LIGHT_BLUE),
-
-            ("TEXTCOLOR", (0, 0), (0, -1), NAVY),
-            ("TEXTCOLOR", (2, 0), (2, -1), NAVY),
-
-            ("FONTNAME", (0, 0), (0, -1), FONT_BOLD),
-            ("FONTNAME", (2, 0), (2, -1), FONT_BOLD),
-
-            ("FONTNAME", (1, 0), (1, -1), FONT_REGULAR),
-            ("FONTNAME", (3, 0), (3, -1), FONT_REGULAR),
-
-            ("FONTSIZE", (0, 0), (-1, -1), 7.2),
-
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-
-            ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
-
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-
-            ("SPAN", (1, 8), (3, 8))
-        ])
-    )
-
-    return table
-
-
-# ==================================================
-# MARKDOWN TABLE DETECTION
-# ==================================================
-
-def is_markdown_table_row(line):
-
-    line = line.strip()
-
-    return (
-        line.startswith("|")
-        and line.endswith("|")
-        and line.count("|") >= 2
-    )
-
-
-def parse_markdown_table(lines):
-
-    rows = []
-
-    for line in lines:
-
-        cells = [
-            cell.strip()
-            for cell in line.strip().strip("|").split("|")
-        ]
-
-        # Ignore Markdown separator rows
-        if all(
-            re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))
-            for cell in cells
-        ):
-            continue
-
-        rows.append(cells)
-
-    return rows
-
-
-def create_markdown_table(rows, styles):
-
-    if not rows:
-        return None
-
-    column_count = max(len(row) for row in rows)
-
-    normalized_rows = []
-
-    for row in rows:
-
-        row = row + [""] * (column_count - len(row))
-
-        normalized_row = []
-
-        for index, cell in enumerate(row):
-
-            style = (
-                styles["TableHeaderCustom"]
-                if len(normalized_rows) == 0
-                else styles["TableCellCustom"]
-            )
-
-            normalized_row.append(
-                Paragraph(
-                    markdown_to_reportlab(cell),
-                    style
-                )
-            )
-
-        normalized_rows.append(normalized_row)
-
-    available_width = 180 * mm
-    column_width = available_width / column_count
-
-    table = Table(
-        normalized_rows,
-        colWidths=[column_width] * column_count,
-        repeatRows=1,
-        hAlign="LEFT"
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-            ("TEXTCOLOR", (0, 0), (-1, 0), WHITE),
-
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
-                WHITE,
-                LIGHT_GREY
-            ]),
-
-            ("GRID", (0, 0), (-1, -1), 0.35, BORDER),
-
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-
-            ("LEFTPADDING", (0, 0), (-1, -1), 5),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-            ("TOPPADDING", (0, 0), (-1, -1), 5),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 5)
-        ])
-    )
-
-    return table
-
-
-# ==================================================
-# DIAGNOSIS CONTENT
-# ==================================================
-
-def add_diagnosis_content(story, diagnosis, styles):
-
-    if not diagnosis:
-
-        story.append(
-            Paragraph(
-                "No diagnostic analysis was provided.",
-                styles["BodyTextCustom"]
-            )
-        )
-
-        return
-
-    lines = str(diagnosis).splitlines()
-
-    index = 0
-
-    while index < len(lines):
-
-        line = lines[index].strip()
-
-        if not line:
-
-            story.append(Spacer(1, 1.5 * mm))
-            index += 1
-            continue
-
-        # Markdown table
-        if is_markdown_table_row(line):
-
-            table_lines = []
-
-            while (
-                index < len(lines)
-                and is_markdown_table_row(lines[index].strip())
-            ):
-
-                table_lines.append(lines[index].strip())
-                index += 1
-
-            rows = parse_markdown_table(table_lines)
-
-            table = create_markdown_table(
-                rows,
-                styles
-            )
-
-            if table:
-                story.append(table)
-                story.append(Spacer(1, 3 * mm))
-
-            continue
-
-        # Main headings
-        if line.startswith("# "):
-
-            heading = markdown_to_reportlab(line[2:])
-
-            story.append(
-                Paragraph(
-                    heading,
-                    styles["SectionHeading"]
-                )
-            )
-
-            index += 1
-            continue
-
-        if line.startswith("## ") or line.startswith("### "):
-
-            heading = markdown_to_reportlab(
-                line.split(" ", 1)[1]
-            )
-
-            story.append(
-                Paragraph(
-                    heading,
-                    styles["SubHeading"]
-                )
-            )
-
-            index += 1
-            continue
-
-        # Bullet points
-        if line.startswith("- ") or line.startswith("* "):
-
-            bullet_text = markdown_to_reportlab(line[2:])
-
-            story.append(
-                Paragraph(
-                    "&#8226; " + bullet_text,
-                    styles["BulletCustom"]
-                )
-            )
-
-            index += 1
-            continue
-
-        # Numbered points
-        numbered_match = re.match(
-            r"^(\d+)[.)]\s+(.*)$",
-            line
-        )
-
-        if numbered_match:
-
-            number = numbered_match.group(1)
-
-            content = markdown_to_reportlab(
-                numbered_match.group(2)
-            )
-
-            story.append(
-                Paragraph(
-                    f"{number}. {content}",
-                    styles["BulletCustom"]
-                )
-            )
-
-            index += 1
-            continue
-
-        # Normal paragraph
-        story.append(
-            Paragraph(
-                markdown_to_reportlab(line),
-                styles["BodyTextCustom"]
-            )
-        )
-
-        index += 1
-
-
-# ==================================================
-# HEADER AND FOOTER
-# ==================================================
-
-def draw_page(canvas, doc):
+# =========================================================
+# 4. PAGE HEADER AND FOOTER
+# =========================================================
+
+def draw_page(canvas, document):
 
     canvas.saveState()
 
     page_width, page_height = A4
 
-    # Top navy line
+    # Top accent line
     canvas.setFillColor(NAVY)
 
     canvas.rect(
@@ -645,97 +302,282 @@ def draw_page(canvas, doc):
         page_width,
         5 * mm,
         fill=1,
-        stroke=0
+        stroke=0,
     )
 
-    # Gold accent
-    canvas.setFillColor(GOLD)
-
-    canvas.rect(
-        0,
-        page_height - 6 * mm,
-        page_width,
-        1 * mm,
-        fill=1,
-        stroke=0
-    )
-
-    # Footer line
+    # Bottom separator
     canvas.setStrokeColor(GOLD)
-    canvas.setLineWidth(0.7)
+
+    canvas.setLineWidth(0.8)
 
     canvas.line(
         15 * mm,
-        15 * mm,
+        14 * mm,
         page_width - 15 * mm,
-        15 * mm
+        14 * mm,
     )
 
-    canvas.setFont(FONT_REGULAR, 7)
-    canvas.setFillColor(DARK_GREY)
+    canvas.setFont("Helvetica", 7)
+
+    canvas.setFillColor(MID_GREY)
 
     canvas.drawString(
         15 * mm,
-        10 * mm,
-        "DOCTOR CAR | Professional Vehicle Diagnostics"
+        9 * mm,
+        COMPANY_FOOTER,
     )
 
     canvas.drawRightString(
         page_width - 15 * mm,
-        10 * mm,
-        f"Page {doc.page}"
+        9 * mm,
+        f"Page {document.page}",
     )
 
     canvas.restoreState()
 
 
-# ==================================================
-# DISCLAIMER
-# ==================================================
+# =========================================================
+# 5. VEHICLE INFORMATION TABLE
+# =========================================================
 
-def create_disclaimer(styles):
+def build_vehicle_table(
+    vehicle,
+    customer_name,
+    customer_phone,
+    report_id,
+    report_date,
+    styles
+):
 
-    disclaimer = (
-        "This report is based on the vehicle information, "
-        "scanner data, diagnostic trouble codes, visual evidence "
-        "and inspection information available at the time of "
-        "inspection. Findings are limited by the quality and "
-        "availability of the supplied data. A diagnostic trouble "
-        "code alone does not prove that a component has failed. "
-        "Further testing may be required to confirm the root cause. "
-        "No guarantee is made regarding future vehicle reliability "
-        "or condition. Repair decisions should be made only after "
-        "appropriate verification by a qualified automotive technician."
-    )
+    vehicle_text = safe_text(vehicle)
 
-    box = Table(
-        [[
+    rows = [
+        [
+            Paragraph("<b>REPORT ID</b>", styles["DoctorSmall"]),
+            Paragraph("<b>REPORT DATE</b>", styles["DoctorSmall"]),
+        ],
+        [
             Paragraph(
-                disclaimer,
-                styles["SmallTextCustom"]
-            )
-        ]],
-        colWidths=[180 * mm]
+                escape_xml(report_id),
+                styles["DoctorBody"]
+            ),
+            Paragraph(
+                escape_xml(report_date),
+                styles["DoctorBody"]
+            ),
+        ],
+        [
+            Paragraph("<b>CUSTOMER</b>", styles["DoctorSmall"]),
+            Paragraph("<b>CONTACT</b>", styles["DoctorSmall"]),
+        ],
+        [
+            Paragraph(
+                escape_xml(customer_name),
+                styles["DoctorBody"]
+            ),
+            Paragraph(
+                escape_xml(customer_phone),
+                styles["DoctorBody"]
+            ),
+        ],
+        [
+            Paragraph("<b>VEHICLE</b>", styles["DoctorSmall"]),
+            Paragraph("<b>INSPECTION TYPE</b>", styles["DoctorSmall"]),
+        ],
+        [
+            Paragraph(
+                escape_xml(vehicle_text),
+                styles["DoctorBody"]
+            ),
+            Paragraph(
+                "Diagnostic Assessment",
+                styles["DoctorBody"]
+            ),
+        ],
+    ]
+
+    table = Table(
+        rows,
+        colWidths=[88 * mm, 88 * mm],
     )
 
-    box.setStyle(
+    table.setStyle(
         TableStyle([
             ("BACKGROUND", (0, 0), (-1, -1), LIGHT_GREY),
-            ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
-
-            ("LEFTPADDING", (0, 0), (-1, -1), 8),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8)
+            ("BACKGROUND", (0, 0), (-1, 0), LIGHT_BLUE),
+            ("BACKGROUND", (0, 2), (-1, 2), LIGHT_BLUE),
+            ("BACKGROUND", (0, 4), (-1, 4), LIGHT_BLUE),
+            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D6DDE6")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6DDE6")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ])
     )
 
-    return box
+    return table
 
 
-# ==================================================
-# MAIN PDF GENERATOR
-# ==================================================
+# =========================================================
+# 6. DIAGNOSIS CONTENT
+# =========================================================
+
+def build_diagnosis_content(diagnosis, styles):
+
+    content = []
+
+    text = clean_report_text(diagnosis)
+
+    lines = text.split("\n")
+
+    for line in lines:
+
+        parsed = parse_markdown_line(line)
+
+        if not parsed:
+            content.append(Spacer(1, 1.5 * mm))
+            continue
+
+        kind, value = parsed
+
+        formatted = format_inline_markdown(value)
+
+        if kind == "heading":
+
+            content.append(
+                Paragraph(
+                    formatted,
+                    styles["DoctorSection"]
+                )
+            )
+
+        elif kind == "subheading":
+
+            content.append(
+                Paragraph(
+                    formatted,
+                    styles["DoctorSection"]
+                )
+            )
+
+        elif kind == "minor_heading":
+
+            content.append(
+                Paragraph(
+                    formatted,
+                    styles["DoctorSubheading"]
+                )
+            )
+
+        elif kind == "bullet":
+
+            content.append(
+                Paragraph(
+                    f"&bull; {formatted}",
+                    styles["DoctorBullet"]
+                )
+            )
+
+        elif kind == "number":
+
+            content.append(
+                Paragraph(
+                    formatted,
+                    styles["DoctorBullet"]
+                )
+            )
+
+        else:
+
+            content.append(
+                Paragraph(
+                    formatted,
+                    styles["DoctorBody"]
+                )
+            )
+
+    return content
+
+
+# =========================================================
+# 7. REPORT STATUS
+# =========================================================
+
+def detect_overall_status(diagnosis):
+
+    text = safe_text(diagnosis).lower()
+
+    if "root cause not confirmed" in text:
+        return "Further Diagnosis Required"
+
+    if "overall status: confirmed" in text:
+        return "Confirmed"
+
+    if "overall status: strongly suspected" in text:
+        return "Strongly Suspected"
+
+    if "overall status: possible" in text:
+        return "Possible"
+
+    if "overall status: further diagnosis required" in text:
+        return "Further Diagnosis Required"
+
+    return "Further Diagnosis Required"
+
+
+def build_status_banner(status, styles):
+
+    if status == "Confirmed":
+
+        background = colors.HexColor("#E4F1E7")
+        foreground = colors.HexColor("#205C32")
+
+    elif status == "Strongly Suspected":
+
+        background = colors.HexColor("#FFF1D6")
+        foreground = colors.HexColor("#805500")
+
+    elif status == "Possible":
+
+        background = colors.HexColor("#E9F1FA")
+        foreground = NAVY
+
+    else:
+
+        background = LIGHT_GREY
+        foreground = DARK_GREY
+
+    table = Table(
+        [[
+            Paragraph(
+                f"<b>OVERALL DIAGNOSTIC STATUS: "
+                f"{escape_xml(status).upper()}</b>",
+                styles["DoctorStatus"]
+            )
+        ]],
+        colWidths=[176 * mm],
+    )
+
+    table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), background),
+            ("TEXTCOLOR", (0, 0), (-1, -1), foreground),
+            ("BOX", (0, 0), (-1, -1), 0.7, foreground),
+            ("LEFTPADDING", (0, 0), (-1, -1), 9),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ])
+    )
+
+    return table
+
+
+# =========================================================
+# 8. COMPLETE PDF GENERATION
+# =========================================================
 
 def generate_pdf(
     vehicle,
@@ -747,185 +589,271 @@ def generate_pdf(
 ):
 
     """
-    Generate Doctor Car professional diagnostic PDF.
-
-    Existing app.py compatibility is preserved.
+    Generate a professional Doctor Car PDF report.
 
     Returns:
-        PDF file bytes
+        bytes: PDF document bytes.
     """
 
-    buffer = BytesIO()
+    if isinstance(vehicle, dict):
+
+        vehicle_parts = [
+            vehicle.get("year", ""),
+            vehicle.get("make", ""),
+            vehicle.get("model", ""),
+            vehicle.get("engine", ""),
+        ]
+
+        vehicle = " ".join(
+            str(part)
+            for part in vehicle_parts
+            if part
+        )
+
+    vehicle = safe_text(vehicle)
+
+    customer_name = safe_text(customer_name)
+
+    customer_phone = safe_text(
+        customer_phone,
+        "Not provided"
+    )
+
+    complaint = safe_text(complaint)
+
+    diagnosis = clean_report_text(diagnosis)
+
+    report_id = safe_text(report_id)
+
+    report_date = datetime.now().strftime(
+        "%d %B %Y"
+    )
+
+    status = detect_overall_status(
+        diagnosis
+    )
+
+    styles = build_styles()
+
+    buffer = io.BytesIO()
 
     document = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        rightMargin=15 * mm,
-        leftMargin=15 * mm,
-        topMargin=15 * mm,
-        bottomMargin=21 * mm,
-        title=f"Doctor Car Diagnostic Report - {report_id}",
-        author="Doctor Car",
-        subject="Vehicle Diagnostic Inspection Report"
+        rightMargin=17 * mm,
+        leftMargin=17 * mm,
+        topMargin=17 * mm,
+        bottomMargin=20 * mm,
+        title=f"Doctor Car Diagnostic Report {report_id}",
+        author=COMPANY_NAME,
+        subject="Automotive Diagnostic Assessment",
     )
-
-    styles = create_styles()
 
     story = []
 
-    # --------------------------------------------------
-    # REPORT HEADER
-    # --------------------------------------------------
-
-    story.append(Spacer(1, 5 * mm))
+    # -----------------------------------------------------
+    # COMPANY HEADER
+    # -----------------------------------------------------
 
     story.append(
-        Paragraph(
-            "DOCTOR CAR",
-            styles["DoctorCarTitle"]
-        )
+        Spacer(1, 5 * mm)
     )
 
     story.append(
         Paragraph(
-            "PROFESSIONAL VEHICLE DIAGNOSTICS",
-            styles["DoctorCarSubtitle"]
+            COMPANY_NAME,
+            styles["DoctorTitle"]
         )
     )
 
     story.append(
         Paragraph(
-            "AI-Assisted Diagnostic Report",
-            ParagraphStyle(
-                "ReportSubtitle",
-                fontName=FONT_BOLD,
-                fontSize=10,
-                leading=13,
-                textColor=NAVY,
-                alignment=TA_CENTER,
-                spaceAfter=3 * mm
-            )
+            COMPANY_TAGLINE,
+            styles["DoctorTagline"]
         )
     )
 
-    # Gold separator
-    separator = Table(
-        [[""]],
-        colWidths=[180 * mm],
-        rowHeights=[1.2 * mm]
+    story.append(
+        HRFlowable(
+            width="100%",
+            thickness=1.5,
+            color=GOLD,
+            spaceBefore=1 * mm,
+            spaceAfter=5 * mm,
+        )
     )
-
-    separator.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), GOLD)
-        ])
-    )
-
-    story.append(separator)
-    story.append(Spacer(1, 4 * mm))
-
-    # --------------------------------------------------
-    # VEHICLE INFORMATION
-    # --------------------------------------------------
 
     story.append(
         Paragraph(
-            "1. VEHICLE & CUSTOMER INFORMATION",
-            styles["SectionHeading"]
+            "VEHICLE DIAGNOSTIC REPORT",
+            styles["DoctorSection"]
+        )
+    )
+
+    # -----------------------------------------------------
+    # VEHICLE DETAILS
+    # -----------------------------------------------------
+
+    story.append(
+        build_vehicle_table(
+            vehicle=vehicle,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            report_id=report_id,
+            report_date=report_date,
+            styles=styles,
         )
     )
 
     story.append(
-        create_vehicle_table(
-            vehicle,
-            customer_name,
-            customer_phone,
-            complaint,
-            report_id
-        )
+        Spacer(1, 5 * mm)
     )
 
-    story.append(Spacer(1, 3 * mm))
-
-    # --------------------------------------------------
-    # DIAGNOSTIC FINDINGS
-    # --------------------------------------------------
-
-    story.append(
-        Paragraph(
-            "2. DIAGNOSTIC ANALYSIS & FINDINGS",
-            styles["SectionHeading"]
-        )
-    )
-
-    add_diagnosis_content(
-        story,
-        diagnosis,
-        styles
-    )
-
-    story.append(Spacer(1, 4 * mm))
-
-    # --------------------------------------------------
-    # DISCLAIMER
-    # --------------------------------------------------
+    # -----------------------------------------------------
+    # CUSTOMER COMPLAINT
+    # -----------------------------------------------------
 
     story.append(
         Paragraph(
-            "IMPORTANT INFORMATION & DISCLAIMER",
-            styles["SectionHeading"]
+            "CUSTOMER REPORTED COMPLAINT",
+            styles["DoctorSection"]
         )
     )
 
     story.append(
-        create_disclaimer(styles)
+        Paragraph(
+            escape_xml(complaint),
+            styles["DoctorBody"]
+        )
     )
 
-    story.append(Spacer(1, 5 * mm))
+    story.append(
+        Spacer(1, 2 * mm)
+    )
 
-    # --------------------------------------------------
-    # REPORT END
-    # --------------------------------------------------
+    # -----------------------------------------------------
+    # OVERALL STATUS
+    # -----------------------------------------------------
+
+    story.append(
+        build_status_banner(
+            status,
+            styles
+        )
+    )
+
+    story.append(
+        Spacer(1, 3 * mm)
+    )
+
+    # -----------------------------------------------------
+    # DIAGNOSTIC ANALYSIS
+    # -----------------------------------------------------
+
+    story.extend(
+        build_diagnosis_content(
+            diagnosis,
+            styles
+        )
+    )
+
+    # -----------------------------------------------------
+    # FINAL DISCLAIMER
+    # -----------------------------------------------------
+
+    story.append(
+        Spacer(1, 5 * mm)
+    )
+
+    story.append(
+        HRFlowable(
+            width="100%",
+            thickness=0.8,
+            color=GOLD,
+            spaceBefore=2 * mm,
+            spaceAfter=3 * mm,
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "IMPORTANT DIAGNOSTIC DISCLAIMER",
+            styles["DoctorSubheading"]
+        )
+    )
+
+    disclaimer = (
+        "This report is based on the information, scanner data "
+        "and inspection findings made available at the time of "
+        "assessment. Diagnostic conclusions may require further "
+        "testing and verification against manufacturer-specific "
+        "procedures and specifications. A stored diagnostic trouble "
+        "code does not, by itself, confirm failure of a particular "
+        "component. This report should not be treated as a guarantee "
+        "of future vehicle performance or as a substitute for "
+        "necessary repair verification."
+    )
+
+    story.append(
+        Paragraph(
+            escape_xml(disclaimer),
+            styles["DoctorSmall"]
+        )
+    )
+
+    story.append(
+        Spacer(1, 5 * mm)
+    )
 
     story.append(
         Paragraph(
             "Prepared by Doctor Car",
-            ParagraphStyle(
-                "PreparedBy",
-                fontName=FONT_BOLD,
-                fontSize=9,
-                leading=12,
-                textColor=NAVY,
-                alignment=TA_CENTER,
-                spaceBefore=3 * mm
-            )
+            styles["DoctorBody"]
         )
     )
 
-    story.append(
-        Paragraph(
-            "Professional Pre-Purchase Vehicle Inspection | UAE",
-            ParagraphStyle(
-                "CompanyTagline",
-                fontName=FONT_REGULAR,
-                fontSize=7,
-                leading=10,
-                textColor=DARK_GREY,
-                alignment=TA_CENTER
-            )
-        )
-    )
-
-    # --------------------------------------------------
+    # -----------------------------------------------------
     # BUILD PDF
-    # --------------------------------------------------
+    # -----------------------------------------------------
 
     document.build(
         story,
         onFirstPage=draw_page,
-        onLaterPages=draw_page
+        onLaterPages=draw_page,
     )
 
     buffer.seek(0)
 
     return buffer.getvalue()
+
+
+# =========================================================
+# 9. SELF TEST
+# =========================================================
+
+def run_report_generator_self_test():
+
+    sample_pdf = generate_pdf(
+        vehicle="2020 Toyota Camry 2.5L",
+        customer_name="Sample Customer",
+        customer_phone="",
+        complaint="Engine warning light is ON.",
+        diagnosis=(
+            "# Executive Diagnostic Summary\n"
+            "Further testing is required.\n"
+            "## Confirmed Findings\n"
+            "- No component failure confirmed.\n"
+            "## Further Tests Required\n"
+            "- Inspect the relevant system.\n"
+            "Overall Status: Further Diagnosis Required"
+        ),
+        report_id="DC-TEST-001",
+    )
+
+    return {
+        "success": (
+            isinstance(sample_pdf, bytes)
+            and sample_pdf.startswith(b"%PDF")
+        ),
+        "file_size": len(sample_pdf),
+    }
