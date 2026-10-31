@@ -1,135 +1,268 @@
 
+import pandas as pd
 import io
 import re
-import pandas as pd
+from difflib import SequenceMatcher
 
 from parameter_database import (
     identify_parameter,
     get_parameter_metadata
 )
 
+from smart_parameter_mapper import (
+    map_parameter,
+    get_mapping_summary
+)
 
-# --------------------------------------------------
-# 1. CLEAN AND CONVERT NUMERIC VALUES
-# --------------------------------------------------
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
 
 def clean_number(value):
+    """Convert scanner values into numbers safely."""
 
     if pd.isna(value):
         return None
+
+    if isinstance(value, (int, float)):
+        return float(value)
 
     text = str(value).strip()
 
     if not text:
         return None
 
-    if text.lower() in [
-        "n/a", "na", "null", "none", "--", "-",
-        "not available", "unsupported", "not supported"
-    ]:
-        return None
-
-    # Remove thousands separators.
     text = text.replace(",", "")
+    text = text.replace("%", "")
+    text = text.replace("°", "")
 
-    match = re.search(
-        r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?",
-        text
-    )
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
 
     if not match:
         return None
 
     try:
-        number = float(match.group(0))
-        return number if pd.notna(number) else None
+        return float(match.group())
     except (ValueError, TypeError):
         return None
 
 
-# --------------------------------------------------
-# 2. READ CSV FILE
-# --------------------------------------------------
+def normalize_text(value):
+    if value is None:
+        return ""
 
-def read_scanner_csv(file_bytes):
+    text = str(value).strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
-    if not file_bytes:
+
+# ============================================================
+# SMART PARAMETER MAPPING
+# ============================================================
+
+def identify_smart_parameter(raw_name, module=""):
+    """
+    First use the existing parameter database.
+    Then use Smart Parameter Mapper.
+    Unconfirmed fuzzy matches are never treated as confirmed.
+    """
+
+    legacy_key = None
+
+    try:
+        legacy_key = identify_parameter(str(raw_name))
+    except Exception:
+        legacy_key = None
+
+    try:
+        mapping = map_parameter(
+            str(raw_name),
+            module=module or ""
+        )
+    except Exception as error:
+        mapping = {
+            "status": "Unmapped",
+            "standard_name": None,
+            "message": str(error)
+        }
+
+    if not isinstance(mapping, dict):
+        mapping = {
+            "status": "Unmapped",
+            "standard_name": None
+        }
+
+    status = mapping.get("status", "Unmapped")
+    standard_name = mapping.get("standard_name")
+
+    # Existing database match is trusted.
+    if legacy_key:
+        return {
+            "parameter_key": legacy_key,
+            "standard_name": standard_name or str(raw_name),
+            "status": "Confirmed",
+            "source": "Existing Parameter Database",
+            "mapping": mapping
+        }
+
+    # Smart mapper confirmed match.
+    if status == "Confirmed" and standard_name:
+        try:
+            resolved_key = identify_parameter(standard_name)
+        except Exception:
+            resolved_key = None
+
+        if resolved_key:
+            return {
+                "parameter_key": resolved_key,
+                "standard_name": standard_name,
+                "status": "Confirmed",
+                "source": "Smart Parameter Mapper",
+                "mapping": mapping
+            }
+
+        # The mapping is confirmed by the mapper,
+        # but the old diagnostic database does not know this key.
+        return {
+            "parameter_key": None,
+            "standard_name": standard_name,
+            "status": "Needs Review",
+            "source": "Smart Mapper - Database Key Missing",
+            "mapping": mapping
+        }
+
+    return {
+        "parameter_key": None,
+        "standard_name": standard_name,
+        "status": status,
+        "source": "Smart Parameter Mapper",
+        "mapping": mapping
+    }
+
+
+# ============================================================
+# CSV READER
+# ============================================================
+
+def read_scanner_csv(uploaded_file):
+    """
+    Read scanner CSV files with different encodings
+    and separators.
+    """
+
+    if uploaded_file is None:
+        raise ValueError("No CSV file uploaded.")
+
+    raw_data = uploaded_file.getvalue()
+
+    if not raw_data:
         raise ValueError("The uploaded CSV file is empty.")
 
     encodings = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
-    separators = [None, ",", ";", "\t"]
+    separators = [",", ";", "\t", "|"]
+
+    last_error = None
 
     for encoding in encodings:
-
         for separator in separators:
-
             try:
                 df = pd.read_csv(
-                    io.BytesIO(file_bytes),
+                    io.BytesIO(raw_data),
                     encoding=encoding,
                     sep=separator,
                     engine="python"
                 )
 
-                if len(df.columns) > 1 and len(df) >= 0:
+                if len(df.columns) > 1 and len(df) > 0:
+                    df.columns = [
+                        str(col).strip()
+                        for col in df.columns
+                    ]
                     return df
 
-            except Exception:
-                continue
+            except Exception as error:
+                last_error = error
+
+    # Try automatic separator detection.
+    for encoding in encodings:
+        try:
+            df = pd.read_csv(
+                io.BytesIO(raw_data),
+                encoding=encoding,
+                sep=None,
+                engine="python"
+            )
+
+            if len(df.columns) > 1 and len(df) > 0:
+                df.columns = [
+                    str(col).strip()
+                    for col in df.columns
+                ]
+                return df
+
+        except Exception as error:
+            last_error = error
 
     raise ValueError(
-        "Unable to read CSV. Please export the scanner CSV again."
+        "Could not read this scanner CSV file. "
+        "Please check the file format. "
+        f"Details: {last_error}"
     )
 
 
-# --------------------------------------------------
-# 3. IDENTIFY TIME COLUMN
-# --------------------------------------------------
+# ============================================================
+# TIME COLUMN DETECTION
+# ============================================================
 
-def find_time_column(columns):
+def find_time_column(df):
 
-    possible_names = [
-        "timestamp",
-        "record time",
-        "sample time",
-        "recorded time",
-        "date time",
-        "datetime",
+    if df is None or df.empty:
+        return None
+
+    time_keywords = [
         "time",
-        "date"
+        "timestamp",
+        "elapsed time",
+        "sample time",
+        "record time",
+        "date time"
     ]
 
-    for column in columns:
+    for column in df.columns:
+        name = normalize_text(column)
 
-        name = str(column).strip().lower()
-
-        if any(
-            name == item or item in name
-            for item in possible_names
-        ):
+        if any(keyword in name for keyword in time_keywords):
             return column
 
     return None
 
 
-# --------------------------------------------------
-# 4. NUMERIC SERIES ANALYSIS
-# --------------------------------------------------
+# ============================================================
+# TREND ANALYSIS
+# ============================================================
 
 def calculate_trend(values):
 
-    values = pd.Series(values).dropna()
+    numeric_values = [
+        clean_number(value)
+        for value in values
+    ]
 
-    if len(values) < 3:
-        return "Insufficient readings"
+    numeric_values = [
+        value for value in numeric_values
+        if value is not None
+    ]
 
-    first = float(values.iloc[0])
-    latest = float(values.iloc[-1])
-    difference = latest - first
+    if len(numeric_values) < 2:
+        return "Insufficient Data"
 
-    scale = max(abs(first), abs(latest), 1)
+    first = numeric_values[0]
+    last = numeric_values[-1]
 
-    if abs(difference) <= scale * 0.01:
+    difference = last - first
+
+    if abs(difference) < 0.0001:
         return "Stable"
 
     if difference > 0:
@@ -138,528 +271,573 @@ def calculate_trend(values):
     return "Decreasing"
 
 
-def summarize_values(values, source_column, parameter_key):
+# ============================================================
+# VALUE SUMMARY
+# ============================================================
 
-    metadata = get_parameter_metadata(parameter_key)
+def summarize_values(values, parameter_key=None):
 
-    values = pd.Series(values).dropna().astype(float)
+    numeric_values = [
+        clean_number(value)
+        for value in values
+    ]
 
-    if len(values) == 0:
-        numeric_values = []
-    else:
-        numeric_values = values.tolist()
+    numeric_values = [
+        value for value in numeric_values
+        if value is not None
+    ]
 
-    first_value = (
-        float(values.iloc[0])
-        if len(values) else None
-    )
-
-    latest_value = (
-        float(values.iloc[-1])
-        if len(values) else None
-    )
-
-    change = (
-        latest_value - first_value
-        if first_value is not None and latest_value is not None
-        else None
-    )
-
-    return {
-        "source_column": str(source_column),
-        "label": metadata.get("label", parameter_key),
-        "unit": metadata.get("unit", ""),
-        "module": metadata.get("module", "Unknown"),
-
-        "valid_count": int(len(values)),
-        "missing_count": int(max(0, len(values) - len(numeric_values))),
-
-        "min": float(values.min()) if len(values) else None,
-        "max": float(values.max()) if len(values) else None,
-        "average": float(values.mean()) if len(values) else None,
-        "median": float(values.median()) if len(values) else None,
-
-        "first": first_value,
-        "latest": latest_value,
-        "change": change,
-
-        "trend": calculate_trend(values),
-
-        "readings": numeric_values
+    result = {
+        "count": len(numeric_values),
+        "missing_count": max(
+            0,
+            len(values) - len(numeric_values)
+        ),
+        "min": None,
+        "max": None,
+        "average": None,
+        "first": None,
+        "last": None,
+        "trend": "Insufficient Data",
+        "metadata": {}
     }
 
+    if not numeric_values:
+        return result
 
-# --------------------------------------------------
-# 5. ANALYZE COLUMN-BASED CSV
-# --------------------------------------------------
+    result["min"] = min(numeric_values)
+    result["max"] = max(numeric_values)
+    result["average"] = sum(numeric_values) / len(numeric_values)
+    result["first"] = numeric_values[0]
+    result["last"] = numeric_values[-1]
+    result["trend"] = calculate_trend(numeric_values)
 
-def analyze_column_data(df):
+    if parameter_key:
+        try:
+            metadata = get_parameter_metadata(parameter_key)
+            if isinstance(metadata, dict):
+                result["metadata"] = metadata
+        except Exception:
+            pass
+
+    return result
+
+
+# ============================================================
+# COLUMN-BASED CSV ANALYSIS
+# ============================================================
+
+def analyze_column_data(df, module=""):
 
     detected = {}
     unmapped = []
-    summary = {}
-
-    time_column = find_time_column(df.columns)
+    needs_review = []
+    mapping_details = []
 
     for column in df.columns:
 
-        parameter_key = identify_parameter(column)
+        mapping_result = identify_smart_parameter(
+            column,
+            module=module
+        )
 
-        if parameter_key:
+        status = mapping_result["status"]
+        parameter_key = mapping_result["parameter_key"]
 
-            detected[str(column)] = parameter_key
+        detail = {
+            "raw_name": str(column),
+            "standard_name": mapping_result["standard_name"],
+            "status": status,
+            "source": mapping_result["source"],
+            "parameter_key": parameter_key
+        }
 
-            values = df[column].apply(clean_number)
+        mapping_details.append(detail)
 
-            item = summarize_values(
-                values,
-                column,
+        if status == "Confirmed" and parameter_key:
+
+            summary = summarize_values(
+                df[column].tolist(),
                 parameter_key
             )
 
-            item["missing_count"] = int(
-                values.isna().sum()
+            summary["column_name"] = str(column)
+            summary["standard_name"] = (
+                mapping_result["standard_name"]
             )
+            summary["mapping_status"] = "Confirmed"
 
-            # Preserve all source columns if duplicate
-            # columns map to the same parameter.
-            if parameter_key in summary:
+            detected[str(column)] = {
+                "parameter_key": parameter_key,
+                "standard_name": mapping_result["standard_name"],
+                "summary": summary,
+                "values": df[column].tolist()
+            }
 
-                previous = summary[parameter_key]
+        elif status == "Needs Review":
+            needs_review.append(detail)
 
-                combined = (
-                    previous.get("readings", [])
-                    + item.get("readings", [])
-                )
-
-                summary[parameter_key] = summarize_values(
-                    combined,
-                    str(previous.get("source_column"))
-                    + " / "
-                    + str(column),
-                    parameter_key
-                )
-
-            else:
-                summary[parameter_key] = item
-
-        elif column != time_column:
-
+        else:
             unmapped.append(str(column))
 
     return {
         "detected": detected,
         "unmapped": unmapped,
-        "summary": summary,
-        "time_column": time_column
+        "needs_review": needs_review,
+        "mapping_details": mapping_details
     }
 
 
-# --------------------------------------------------
-# 6. ANALYZE ROW-BASED CSV
-# --------------------------------------------------
+# ============================================================
+# ROW-BASED CSV ANALYSIS
+# ============================================================
 
-def analyze_row_data(df):
-
-    if len(df.columns) < 2:
-
-        return {
-            "detected": {},
-            "unmapped": list(map(str, df.columns)),
-            "summary": {},
-            "time_column": None
-        }
-
-    name_column = None
-    value_column = None
-
-    for column in df.columns:
-
-        name = str(column).strip().lower()
-
-        if any(word in name for word in [
-            "parameter", "name", "pid", "item"
-        ]):
-            name_column = column
-
-        if any(word in name for word in [
-            "value", "reading", "data"
-        ]):
-            value_column = column
-
-    if name_column is None:
-        name_column = df.columns[0]
-
-    if value_column is None:
-        value_column = df.columns[1]
+def analyze_row_data(df, module=""):
 
     detected = {}
-    unmapped_parameters = []
-    grouped_values = {}
+    unmapped = []
+    needs_review = []
+    mapping_details = []
 
-    for _, row in df.iterrows():
+    if df.empty:
+        return {
+            "detected": detected,
+            "unmapped": unmapped,
+            "needs_review": needs_review,
+            "mapping_details": mapping_details
+        }
 
-        parameter_name = row.get(name_column, "")
+    for index, row in df.iterrows():
 
-        parameter_key = identify_parameter(parameter_name)
-
-        if not parameter_key:
-
-            if str(parameter_name).strip():
-                unmapped_parameters.append(
-                    str(parameter_name)
-                )
-
+        if len(row) < 2:
             continue
 
-        value = clean_number(row.get(value_column))
+        raw_name = str(row.iloc[0]).strip()
 
-        detected[str(parameter_name)] = parameter_key
+        if not raw_name or raw_name.lower() == "nan":
+            continue
 
-        grouped_values.setdefault(
-            parameter_key,
-            []
-        ).append(value)
-
-    summary = {}
-
-    for parameter_key, values in grouped_values.items():
-
-        valid_values = [
-            value for value in values
-            if value is not None
-        ]
-
-        item = summarize_values(
-            valid_values,
-            str(name_column) + " -> " + str(value_column),
-            parameter_key
+        mapping_result = identify_smart_parameter(
+            raw_name,
+            module=module
         )
 
-        item["missing_count"] = int(
-            len(values) - len(valid_values)
-        )
+        status = mapping_result["status"]
+        parameter_key = mapping_result["parameter_key"]
 
-        summary[parameter_key] = item
+        detail = {
+            "raw_name": raw_name,
+            "standard_name": mapping_result["standard_name"],
+            "status": status,
+            "source": mapping_result["source"],
+            "parameter_key": parameter_key
+        }
 
-    unmapped = list(dict.fromkeys(unmapped_parameters))
+        mapping_details.append(detail)
+
+        values = row.iloc[1:].tolist()
+
+        if status == "Confirmed" and parameter_key:
+
+            summary = summarize_values(
+                values,
+                parameter_key
+            )
+
+            summary["row_name"] = raw_name
+            summary["standard_name"] = (
+                mapping_result["standard_name"]
+            )
+            summary["mapping_status"] = "Confirmed"
+
+            detected[raw_name] = {
+                "parameter_key": parameter_key,
+                "standard_name": mapping_result["standard_name"],
+                "summary": summary,
+                "values": values
+            }
+
+        elif status == "Needs Review":
+            needs_review.append(detail)
+
+        else:
+            unmapped.append(raw_name)
 
     return {
         "detected": detected,
         "unmapped": unmapped,
-        "summary": summary,
-        "time_column": find_time_column(df.columns)
+        "needs_review": needs_review,
+        "mapping_details": mapping_details
     }
 
 
-# --------------------------------------------------
-# 7. REQUIRED PARAMETER CHECK
-# --------------------------------------------------
+# ============================================================
+# REQUIRED PARAMETER CHECK
+# ============================================================
 
-def check_required_parameters(summary, required_parameters=None):
+def check_required_parameters(
+    detected,
+    required_parameters=None
+):
 
     if not required_parameters:
         return {
             "required": [],
-            "available": [],
+            "found": [],
             "missing": []
         }
 
-    required = []
+    found_keys = set()
 
-    for item in required_parameters:
+    for item in detected.values():
+        key = item.get("parameter_key")
+        if key:
+            found_keys.add(key)
 
-        if isinstance(item, str):
-            required.append(item)
+    found = []
+    missing = []
 
-        elif isinstance(item, dict):
-            key = item.get("key") or item.get("parameter")
-            if key:
-                required.append(str(key))
+    for parameter in required_parameters:
 
-    required = list(dict.fromkeys(required))
-
-    available = [
-        key for key in required
-        if key in summary
-    ]
-
-    missing = [
-        key for key in required
-        if key not in summary
-    ]
+        if parameter in found_keys:
+            found.append(parameter)
+        else:
+            missing.append(parameter)
 
     return {
-        "required": required,
-        "available": available,
+        "required": required_parameters,
+        "found": found,
         "missing": missing
     }
 
 
-# --------------------------------------------------
-# 8. CONDITION COMPARISON
-# --------------------------------------------------
+# ============================================================
+# CONDITION COMPARISON
+# ============================================================
 
-def compare_conditions(df, detected, condition_column):
-
-    if (
-        condition_column not in df.columns
-        or not detected
-    ):
-        return {}
+def compare_conditions(
+    df,
+    detected,
+    condition_column
+):
 
     comparisons = {}
 
-    condition_values = (
-        df[condition_column]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+    if (
+        condition_column not in df.columns
+        or condition_column is None
+    ):
+        return comparisons
 
-    if len(condition_values) < 2:
-        return {}
+    conditions = df[condition_column].dropna().unique()
 
-    for source_column, parameter_key in detected.items():
+    if len(conditions) < 2:
+        return comparisons
 
-        if source_column not in df.columns:
+    for column_name, parameter_data in detected.items():
+
+        if column_name not in df.columns:
             continue
 
-        groups = {}
+        parameter_comparison = {}
 
-        for condition in condition_values:
+        for condition in conditions:
 
-            mask = (
-                df[condition_column].astype(str) == condition
+            subset = df[
+                df[condition_column] == condition
+            ][column_name]
+
+            summary = summarize_values(
+                subset.tolist(),
+                parameter_data.get("parameter_key")
             )
 
-            values = (
-                df.loc[mask, source_column]
-                .apply(clean_number)
-                .dropna()
-            )
+            parameter_comparison[str(condition)] = summary
 
-            if len(values):
-
-                groups[condition] = {
-                    "count": int(len(values)),
-                    "average": float(values.mean()),
-                    "minimum": float(values.min()),
-                    "maximum": float(values.max()),
-                    "latest": float(values.iloc[-1])
-                }
-
-        if len(groups) >= 2:
-
-            comparisons[parameter_key] = {
-                "source_column": str(source_column),
-                "condition_column": str(condition_column),
-                "groups": groups
-            }
+        comparisons[column_name] = parameter_comparison
 
     return comparisons
 
 
-# --------------------------------------------------
-# 9. MAIN CSV ANALYZER
-# --------------------------------------------------
+# ============================================================
+# MAIN CSV ANALYSIS
+# ============================================================
 
 def analyze_csv(
     uploaded_file,
     required_parameters=None,
-    condition_column=None
+    condition_column=None,
+    module=""
 ):
 
-    if hasattr(uploaded_file, "getvalue"):
-        file_bytes = uploaded_file.getvalue()
-    else:
-        file_bytes = uploaded_file.read()
-
-    df = read_scanner_csv(file_bytes)
-
-    df.columns = [
-        str(column).strip()
-        for column in df.columns
-    ]
+    df = read_scanner_csv(uploaded_file)
 
     if df.empty:
-        raise ValueError("The CSV file contains no data rows.")
+        raise ValueError("CSV file contains no data rows.")
 
-    column_result = analyze_column_data(df)
+    time_column = find_time_column(df)
 
-    result = column_result
+    # Detect whether the CSV is column-based or row-based.
+    column_result = analyze_column_data(
+        df,
+        module=module
+    )
 
-    # Try row-based format if column-based detection fails.
-    if not result["summary"]:
+    row_result = analyze_row_data(
+        df,
+        module=module
+    )
 
-        row_result = analyze_row_data(df)
+    # Choose the layout with more confirmed parameters.
+    if len(row_result["detected"]) > len(column_result["detected"]):
+        selected = row_result
+        csv_layout = "Row Based"
+    else:
+        selected = column_result
+        csv_layout = "Column Based"
 
-        if row_result["summary"]:
-            result = row_result
+    detected = selected["detected"]
+    unmapped = selected["unmapped"]
+    needs_review = selected["needs_review"]
+    mapping_details = selected["mapping_details"]
 
     required_check = check_required_parameters(
-        result["summary"],
+        detected,
         required_parameters
     )
 
-    comparisons = {}
+    condition_comparisons = {}
 
     if condition_column:
-        comparisons = compare_conditions(
+        condition_comparisons = compare_conditions(
             df,
-            result["detected"],
+            detected,
             condition_column
         )
 
+    total_parameters = len(mapping_details)
+
+    confirmed_count = sum(
+        1 for item in mapping_details
+        if item["status"] == "Confirmed"
+    )
+
+    review_count = len(needs_review)
+    unmapped_count = len(unmapped)
+
+    data_quality = {
+        "total_rows": len(df),
+        "total_columns": len(df.columns),
+        "total_parameters": total_parameters,
+        "confirmed_parameters": confirmed_count,
+        "needs_review": review_count,
+        "unmapped_parameters": unmapped_count,
+        "missing_cells": int(df.isna().sum().sum()),
+        "duplicate_rows": int(df.duplicated().sum()),
+        "csv_layout": csv_layout
+    }
+
+    mapping_summary = {
+        "total": total_parameters,
+        "confirmed": confirmed_count,
+        "needs_review": review_count,
+        "unmapped": unmapped_count
+    }
+
+    try:
+        external_mapping_summary = get_mapping_summary()
+    except Exception:
+        external_mapping_summary = None
+
     return {
         "dataframe": df,
-
-        "rows": int(len(df)),
+        "rows": df.to_dict(orient="records"),
         "columns": list(df.columns),
-
-        "detected": result["detected"],
-        "unmapped": result["unmapped"],
-        "summary": result["summary"],
-
-        "time_column": result["time_column"],
-
+        "detected": detected,
+        "unmapped": unmapped,
+        "needs_review": needs_review,
+        "mapping_details": mapping_details,
+        "mapping_summary": mapping_summary,
+        "saved_mapping_summary": external_mapping_summary,
+        "summary": {
+            "total_rows": len(df),
+            "total_columns": len(df.columns),
+            "detected_parameters": len(detected),
+            "unmapped_parameters": len(unmapped)
+        },
+        "time_column": time_column,
         "required_parameters": required_check,
-
-        "condition_comparisons": comparisons,
-
+        "condition_comparisons": condition_comparisons,
         "file_name": getattr(
             uploaded_file,
             "name",
-            "uploaded.csv"
+            "scanner_data.csv"
         ),
-
-        "data_quality": {
-            "row_count": int(len(df)),
-
-            "recognized_parameter_count": len(
-                result["summary"]
-            ),
-
-            "unmapped_columns": result["unmapped"],
-
-            "time_column": (
-                str(result["time_column"])
-                if result["time_column"]
-                else None
-            ),
-
-            "required_parameter_count": len(
-                required_check["required"]
-            ),
-
-            "missing_required_parameter_count": len(
-                required_check["missing"]
-            )
-        }
+        "data_quality": data_quality,
+        "csv_layout": csv_layout
     }
 
 
-# --------------------------------------------------
-# 10. CONVERT CSV DATA FOR AI
-# --------------------------------------------------
+# ============================================================
+# CSV DATA FOR AI ANALYSIS
+# ============================================================
 
-def get_csv_text_for_ai(result, max_rows=250):
+def get_csv_text_for_ai(df, max_rows=100):
 
-    df = result.get("dataframe")
-
-    if df is None:
+    if df is None or df.empty:
         return "No CSV data available."
 
-    safe_df = df.head(max_rows).copy()
+    limited_df = df.head(max_rows)
 
-    return safe_df.to_csv(index=False)
+    return limited_df.to_csv(index=False)
 
 
-# --------------------------------------------------
-# 11. BUILD MULTI-MODULE AI SUMMARY
-# --------------------------------------------------
+# ============================================================
+# BUILD AI SUMMARY
+# ============================================================
 
-def build_csv_ai_summary(module_results):
+def build_csv_ai_summary(analysis_result):
 
-    output = []
+    if not analysis_result:
+        return "No CSV analysis available."
 
-    for module, result in (module_results or {}).items():
+    lines = []
 
-        output.append("\nMODULE: " + str(module))
+    lines.append("SCANNER CSV ANALYSIS")
+    lines.append("====================")
 
-        output.append(
-            "File: "
-            + str(result.get("file_name", "Unknown"))
+    lines.append(
+        f"CSV Layout: {analysis_result.get('csv_layout', 'Unknown')}"
+    )
+
+    quality = analysis_result.get("data_quality", {})
+
+    lines.append(
+        f"Rows: {quality.get('total_rows', 0)}"
+    )
+
+    lines.append(
+        f"Columns: {quality.get('total_columns', 0)}"
+    )
+
+    lines.append(
+        f"Missing Cells: {quality.get('missing_cells', 0)}"
+    )
+
+    lines.append(
+        f"Duplicate Rows: {quality.get('duplicate_rows', 0)}"
+    )
+
+    lines.append("")
+    lines.append("PARAMETER MAPPING")
+    lines.append("-----------------")
+
+    mapping_summary = analysis_result.get(
+        "mapping_summary",
+        {}
+    )
+
+    lines.append(
+        f"Confirmed: {mapping_summary.get('confirmed', 0)}"
+    )
+
+    lines.append(
+        f"Needs Review: {mapping_summary.get('needs_review', 0)}"
+    )
+
+    lines.append(
+        f"Unmapped: {mapping_summary.get('unmapped', 0)}"
+    )
+
+    lines.append("")
+    lines.append("CONFIRMED PARAMETERS")
+    lines.append("--------------------")
+
+    detected = analysis_result.get("detected", {})
+
+    if not detected:
+        lines.append("No confirmed parameters detected.")
+
+    for column_name, item in detected.items():
+
+        summary = item.get("summary", {})
+
+        lines.append(
+            f"\nParameter: {item.get('standard_name', column_name)}"
         )
 
-        output.append(
-            "Rows: "
-            + str(result.get("rows", 0))
+        lines.append(
+            f"Original Scanner Name: {column_name}"
         )
 
-        output.append(
-            "Recognized parameters: "
-            + str(len(result.get("summary", {})))
+        lines.append(
+            f"Minimum: {summary.get('min')}"
         )
 
-        for key, item in result.get("summary", {}).items():
+        lines.append(
+            f"Maximum: {summary.get('max')}"
+        )
 
-            output.append(
-                "- "
-                + str(item.get("label", key))
-                + ": Latest="
-                + str(item.get("latest"))
-                + " "
-                + str(item.get("unit", ""))
-                + "; First="
-                + str(item.get("first"))
-                + "; Minimum="
-                + str(item.get("min"))
-                + "; Maximum="
-                + str(item.get("max"))
-                + "; Average="
-                + str(item.get("average"))
-                + "; Trend="
-                + str(item.get("trend"))
-                + "; Change="
-                + str(item.get("change"))
-                + "; Valid readings="
-                + str(item.get("valid_count"))
-                + "; Missing readings="
-                + str(item.get("missing_count"))
-            )
+        lines.append(
+            f"Average: {summary.get('average')}"
+        )
 
-        required = result.get("required_parameters", {})
+        lines.append(
+            f"First Value: {summary.get('first')}"
+        )
 
-        if required.get("missing"):
+        lines.append(
+            f"Last Value: {summary.get('last')}"
+        )
 
-            output.append(
-                "Missing required parameters: "
-                + ", ".join(required["missing"])
-            )
+        lines.append(
+            f"Trend: {summary.get('trend')}"
+        )
 
-        if result.get("condition_comparisons"):
+    lines.append("")
+    lines.append("PARAMETERS NEEDING REVIEW")
+    lines.append("-------------------------")
 
-            output.append("CONDITION COMPARISONS:")
+    needs_review = analysis_result.get("needs_review", [])
 
-            for key, comparison in result[
-                "condition_comparisons"
-            ].items():
+    if not needs_review:
+        lines.append("None.")
 
-                output.append(
-                    str(key)
-                    + ": "
-                    + str(comparison.get("groups"))
-                )
+    for item in needs_review:
+        lines.append(
+            f"{item.get('raw_name')} -> "
+            f"{item.get('standard_name')} "
+            f"(Status: {item.get('status')})"
+        )
 
-        if result.get("unmapped"):
+    lines.append("")
+    lines.append("UNMAPPED PARAMETERS")
+    lines.append("-------------------")
 
-            output.append(
-                "Unmapped columns/parameters: "
-                + ", ".join(
-                    map(str, result["unmapped"][:30])
-                )
-            )
+    unmapped = analysis_result.get("unmapped", [])
 
-    return "\n".join(output)
+    if not unmapped:
+        lines.append("None.")
+
+    for item in unmapped:
+        lines.append(str(item))
+
+    lines.append("")
+    lines.append("IMPORTANT DIAGNOSTIC RULES")
+    lines.append("--------------------------")
+    lines.append(
+        "Do not assume a missing parameter is zero."
+    )
+    lines.append(
+        "Do not treat an unconfirmed parameter mapping as verified data."
+    )
+    lines.append(
+        "Do not diagnose a failed component using a DTC or one live-data "
+        "reading alone."
+    )
+    lines.append(
+        "Consider vehicle details, operating conditions, DTCs, freeze-frame "
+        "data and physical test results before suggesting a root cause."
+    )
+
+    return "\n".join(lines)
