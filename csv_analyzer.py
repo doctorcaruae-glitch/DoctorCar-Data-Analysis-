@@ -1,843 +1,1057 @@
+"""
+Doctor Car - Advanced CSV Analyzer
+
+Features:
+- THINKDIAG / Autel scanner CSV support
+- Column-based and row-based CSV handling
+- Smart parameter mapping
+- Confirmed vs Needs Review separation
+- Unit and data-quality checks
+- Missing-data detection
+- Live-data trend analysis
+- Operating-condition comparison
+- AI-ready diagnostic summary
+
+Important:
+Unconfirmed parameter mappings are never treated as confirmed
+diagnostic evidence.
+"""
+
+import csv
+import io
+import math
+import re
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import io
-import re
-from difflib import SequenceMatcher
 
 from parameter_database import (
-    identify_parameter,
-    get_parameter_metadata
+    PARAMETERS,
+    default_parameter_requirements,
 )
 
 from smart_parameter_mapper import (
+    map_columns,
     map_parameter,
-    get_mapping_summary
+    get_mapping_summary,
 )
 
 
-# ============================================================
-# BASIC HELPERS
-# ============================================================
+# =========================================================
+# 1. BASIC DATA CLEANING
+# =========================================================
 
 def clean_number(value):
     """Convert scanner values into numbers safely."""
 
-    if pd.isna(value):
+    if value is None:
         return None
 
+    if isinstance(value, bool):
+        return int(value)
+
     if isinstance(value, (int, float)):
-        return float(value)
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
 
     text = str(value).strip()
 
     if not text:
         return None
 
-    text = text.replace(",", "")
-    text = text.replace("%", "")
-    text = text.replace("°", "")
+    invalid_values = {
+        "-", "--", "---", "n/a", "na", "null",
+        "none", "not available", "invalid",
+        "error", "no data"
+    }
 
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if text.lower() in invalid_values:
+        return None
+
+    text = text.replace(",", "")
+
+    match = re.search(
+        r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?",
+        text
+    )
 
     if not match:
         return None
 
     try:
-        return float(match.group())
+        number = float(match.group())
+
+        if not math.isfinite(number):
+            return None
+
+        return number
+
     except (ValueError, TypeError):
         return None
 
 
-def normalize_text(value):
-    if value is None:
+def normalize_column_name(name):
+    if name is None:
         return ""
 
-    text = str(value).strip().lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        str(name).strip()
+    )
 
 
-# ============================================================
-# SMART PARAMETER MAPPING
-# ============================================================
+def detect_unit(column_name):
+    """Extract a unit written in a column heading."""
 
-def identify_smart_parameter(raw_name, module=""):
-    """
-    First use the existing parameter database.
-    Then use Smart Parameter Mapper.
-    Unconfirmed fuzzy matches are never treated as confirmed.
-    """
+    if not column_name:
+        return None
 
-    legacy_key = None
+    text = str(column_name).strip()
 
-    try:
-        legacy_key = identify_parameter(str(raw_name))
-    except Exception:
-        legacy_key = None
+    patterns = [
+        r"\(([^()]*)\)\s*$",
+        r"\[([^\[\]]*)\]\s*$",
+    ]
 
-    try:
-        mapping = map_parameter(
-            str(raw_name),
-            module=module or ""
-        )
-    except Exception as error:
-        mapping = {
-            "status": "Unmapped",
-            "standard_name": None,
-            "message": str(error)
-        }
+    for pattern in patterns:
+        match = re.search(pattern, text)
 
-    if not isinstance(mapping, dict):
-        mapping = {
-            "status": "Unmapped",
-            "standard_name": None
-        }
+        if match:
+            return match.group(1).strip()
 
-    status = mapping.get("status", "Unmapped")
-    standard_name = mapping.get("standard_name")
-
-    # Existing database match is trusted.
-    if legacy_key:
-        return {
-            "parameter_key": legacy_key,
-            "standard_name": standard_name or str(raw_name),
-            "status": "Confirmed",
-            "source": "Existing Parameter Database",
-            "mapping": mapping
-        }
-
-    # Smart mapper confirmed match.
-    if status == "Confirmed" and standard_name:
-        try:
-            resolved_key = identify_parameter(standard_name)
-        except Exception:
-            resolved_key = None
-
-        if resolved_key:
-            return {
-                "parameter_key": resolved_key,
-                "standard_name": standard_name,
-                "status": "Confirmed",
-                "source": "Smart Parameter Mapper",
-                "mapping": mapping
-            }
-
-        # The mapping is confirmed by the mapper,
-        # but the old diagnostic database does not know this key.
-        return {
-            "parameter_key": None,
-            "standard_name": standard_name,
-            "status": "Needs Review",
-            "source": "Smart Mapper - Database Key Missing",
-            "mapping": mapping
-        }
-
-    return {
-        "parameter_key": None,
-        "standard_name": standard_name,
-        "status": status,
-        "source": "Smart Parameter Mapper",
-        "mapping": mapping
-    }
+    return None
 
 
-# ============================================================
-# CSV READER
-# ============================================================
+# =========================================================
+# 2. CSV READING
+# =========================================================
 
 def read_scanner_csv(uploaded_file):
     """
-    Read scanner CSV files with different encodings
-    and separators.
+    Read a CSV from Streamlit UploadedFile, file path,
+    bytes, or file-like object.
     """
 
-    if uploaded_file is None:
-        raise ValueError("No CSV file uploaded.")
+    if isinstance(uploaded_file, pd.DataFrame):
+        return uploaded_file.copy()
 
-    raw_data = uploaded_file.getvalue()
+    if isinstance(uploaded_file, bytes):
+        raw_data = uploaded_file
+
+    elif isinstance(uploaded_file, str):
+        with open(uploaded_file, "rb") as file:
+            raw_data = file.read()
+
+    else:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+
+        raw_data = uploaded_file.read()
+
+    if isinstance(raw_data, str):
+        raw_data = raw_data.encode("utf-8-sig")
 
     if not raw_data:
         raise ValueError("The uploaded CSV file is empty.")
 
-    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin1"]
-    separators = [",", ";", "\t", "|"]
-
-    last_error = None
-
-    for encoding in encodings:
-        for separator in separators:
-            try:
-                df = pd.read_csv(
-                    io.BytesIO(raw_data),
-                    encoding=encoding,
-                    sep=separator,
-                    engine="python"
-                )
-
-                if len(df.columns) > 1 and len(df) > 0:
-                    df.columns = [
-                        str(col).strip()
-                        for col in df.columns
-                    ]
-                    return df
-
-            except Exception as error:
-                last_error = error
-
-    # Try automatic separator detection.
-    for encoding in encodings:
-        try:
-            df = pd.read_csv(
-                io.BytesIO(raw_data),
-                encoding=encoding,
-                sep=None,
-                engine="python"
-            )
-
-            if len(df.columns) > 1 and len(df) > 0:
-                df.columns = [
-                    str(col).strip()
-                    for col in df.columns
-                ]
-                return df
-
-        except Exception as error:
-            last_error = error
-
-    raise ValueError(
-        "Could not read this scanner CSV file. "
-        "Please check the file format. "
-        f"Details: {last_error}"
-    )
-
-
-# ============================================================
-# TIME COLUMN DETECTION
-# ============================================================
-
-def find_time_column(df):
-
-    if df is None or df.empty:
-        return None
-
-    time_keywords = [
-        "time",
-        "timestamp",
-        "elapsed time",
-        "sample time",
-        "record time",
-        "date time"
+    encodings = [
+        "utf-8-sig",
+        "utf-8",
+        "cp1252",
+        "latin1",
     ]
 
-    for column in df.columns:
-        name = normalize_text(column)
+    decoded = None
 
-        if any(keyword in name for keyword in time_keywords):
+    for encoding in encodings:
+        try:
+            decoded = raw_data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+
+    if decoded is None:
+        raise ValueError(
+            "Unable to read CSV encoding. "
+            "Please export the scanner data as UTF-8 CSV."
+        )
+
+    try:
+        dialect = csv.Sniffer().sniff(
+            decoded[:10000],
+            delimiters=",;\t|"
+        )
+
+        delimiter = dialect.delimiter
+
+    except Exception:
+        delimiter = ","
+
+    try:
+        dataframe = pd.read_csv(
+            io.StringIO(decoded),
+            sep=delimiter,
+            dtype=str,
+            on_bad_lines="skip"
+        )
+
+    except Exception:
+        dataframe = pd.read_csv(
+            io.StringIO(decoded),
+            sep=None,
+            engine="python",
+            dtype=str,
+            on_bad_lines="skip"
+        )
+
+    dataframe.columns = [
+        normalize_column_name(column)
+        for column in dataframe.columns
+    ]
+
+    dataframe = dataframe.dropna(
+        axis=0,
+        how="all"
+    )
+
+    dataframe = dataframe.dropna(
+        axis=1,
+        how="all"
+    )
+
+    if dataframe.empty:
+        raise ValueError(
+            "No usable data was found in the CSV file."
+        )
+
+    return dataframe
+
+
+# =========================================================
+# 3. TIME COLUMN DETECTION
+# =========================================================
+
+def find_time_column(dataframe):
+
+    keywords = [
+        "time",
+        "timestamp",
+        "elapsed",
+        "seconds",
+        "record time",
+        "sample time",
+    ]
+
+    for column in dataframe.columns:
+
+        name = str(column).lower()
+
+        if any(keyword in name for keyword in keywords):
             return column
 
     return None
 
 
-# ============================================================
-# TREND ANALYSIS
-# ============================================================
+# =========================================================
+# 4. NUMERIC DATA EXTRACTION
+# =========================================================
+
+def get_numeric_series(dataframe, column):
+
+    if column not in dataframe.columns:
+        return pd.Series(dtype=float)
+
+    return dataframe[column].apply(clean_number)
+
 
 def calculate_trend(values):
+    """
+    Calculate a basic trend.
 
-    numeric_values = [
-        clean_number(value)
+    This does not determine whether a value is healthy.
+    Vehicle-specific specifications are still required.
+    """
+
+    numbers = [
+        float(value)
         for value in values
-    ]
-
-    numeric_values = [
-        value for value in numeric_values
         if value is not None
+        and not pd.isna(value)
     ]
 
-    if len(numeric_values) < 2:
-        return "Insufficient Data"
-
-    first = numeric_values[0]
-    last = numeric_values[-1]
-
-    difference = last - first
-
-    if abs(difference) < 0.0001:
-        return "Stable"
-
-    if difference > 0:
-        return "Increasing"
-
-    return "Decreasing"
-
-
-# ============================================================
-# VALUE SUMMARY
-# ============================================================
-
-def summarize_values(values, parameter_key=None):
-
-    numeric_values = [
-        clean_number(value)
-        for value in values
-    ]
-
-    numeric_values = [
-        value for value in numeric_values
-        if value is not None
-    ]
-
-    result = {
-        "count": len(numeric_values),
-        "missing_count": max(
-            0,
-            len(values) - len(numeric_values)
-        ),
-        "min": None,
-        "max": None,
-        "average": None,
-        "first": None,
-        "last": None,
-        "trend": "Insufficient Data",
-        "metadata": {}
-    }
-
-    if not numeric_values:
-        return result
-
-    result["min"] = min(numeric_values)
-    result["max"] = max(numeric_values)
-    result["average"] = sum(numeric_values) / len(numeric_values)
-    result["first"] = numeric_values[0]
-    result["last"] = numeric_values[-1]
-    result["trend"] = calculate_trend(numeric_values)
-
-    if parameter_key:
-        try:
-            metadata = get_parameter_metadata(parameter_key)
-            if isinstance(metadata, dict):
-                result["metadata"] = metadata
-        except Exception:
-            pass
-
-    return result
-
-
-# ============================================================
-# COLUMN-BASED CSV ANALYSIS
-# ============================================================
-
-def analyze_column_data(df, module=""):
-
-    detected = {}
-    unmapped = []
-    needs_review = []
-    mapping_details = []
-
-    for column in df.columns:
-
-        mapping_result = identify_smart_parameter(
-            column,
-            module=module
-        )
-
-        status = mapping_result["status"]
-        parameter_key = mapping_result["parameter_key"]
-
-        detail = {
-            "raw_name": str(column),
-            "standard_name": mapping_result["standard_name"],
-            "status": status,
-            "source": mapping_result["source"],
-            "parameter_key": parameter_key
-        }
-
-        mapping_details.append(detail)
-
-        if status == "Confirmed" and parameter_key:
-
-            summary = summarize_values(
-                df[column].tolist(),
-                parameter_key
-            )
-
-            summary["column_name"] = str(column)
-            summary["standard_name"] = (
-                mapping_result["standard_name"]
-            )
-            summary["mapping_status"] = "Confirmed"
-
-            detected[str(column)] = {
-                "parameter_key": parameter_key,
-                "standard_name": mapping_result["standard_name"],
-                "summary": summary,
-                "values": df[column].tolist()
-            }
-
-        elif status == "Needs Review":
-            needs_review.append(detail)
-
-        else:
-            unmapped.append(str(column))
-
-    return {
-        "detected": detected,
-        "unmapped": unmapped,
-        "needs_review": needs_review,
-        "mapping_details": mapping_details
-    }
-
-
-# ============================================================
-# ROW-BASED CSV ANALYSIS
-# ============================================================
-
-def analyze_row_data(df, module=""):
-
-    detected = {}
-    unmapped = []
-    needs_review = []
-    mapping_details = []
-
-    if df.empty:
+    if len(numbers) < 2:
         return {
-            "detected": detected,
-            "unmapped": unmapped,
-            "needs_review": needs_review,
-            "mapping_details": mapping_details
+            "trend": "Insufficient Data",
+            "change": None,
+            "first_value": numbers[0] if numbers else None,
+            "last_value": numbers[-1] if numbers else None,
         }
 
-    for index, row in df.iterrows():
+    first_value = numbers[0]
+    last_value = numbers[-1]
+    change = last_value - first_value
 
-        if len(row) < 2:
-            continue
+    if abs(change) < 0.000001:
+        trend = "Stable"
 
-        raw_name = str(row.iloc[0]).strip()
+    elif change > 0:
+        trend = "Increasing"
 
-        if not raw_name or raw_name.lower() == "nan":
-            continue
-
-        mapping_result = identify_smart_parameter(
-            raw_name,
-            module=module
-        )
-
-        status = mapping_result["status"]
-        parameter_key = mapping_result["parameter_key"]
-
-        detail = {
-            "raw_name": raw_name,
-            "standard_name": mapping_result["standard_name"],
-            "status": status,
-            "source": mapping_result["source"],
-            "parameter_key": parameter_key
-        }
-
-        mapping_details.append(detail)
-
-        values = row.iloc[1:].tolist()
-
-        if status == "Confirmed" and parameter_key:
-
-            summary = summarize_values(
-                values,
-                parameter_key
-            )
-
-            summary["row_name"] = raw_name
-            summary["standard_name"] = (
-                mapping_result["standard_name"]
-            )
-            summary["mapping_status"] = "Confirmed"
-
-            detected[raw_name] = {
-                "parameter_key": parameter_key,
-                "standard_name": mapping_result["standard_name"],
-                "summary": summary,
-                "values": values
-            }
-
-        elif status == "Needs Review":
-            needs_review.append(detail)
-
-        else:
-            unmapped.append(raw_name)
+    else:
+        trend = "Decreasing"
 
     return {
-        "detected": detected,
-        "unmapped": unmapped,
-        "needs_review": needs_review,
-        "mapping_details": mapping_details
+        "trend": trend,
+        "change": change,
+        "first_value": first_value,
+        "last_value": last_value,
     }
 
 
-# ============================================================
-# REQUIRED PARAMETER CHECK
-# ============================================================
+def summarize_values(values):
+
+    numbers = [
+        float(value)
+        for value in values
+        if value is not None
+        and not pd.isna(value)
+    ]
+
+    if not numbers:
+        return {
+            "count": 0,
+            "minimum": None,
+            "maximum": None,
+            "average": None,
+            "first": None,
+            "last": None,
+        }
+
+    return {
+        "count": len(numbers),
+        "minimum": min(numbers),
+        "maximum": max(numbers),
+        "average": sum(numbers) / len(numbers),
+        "first": numbers[0],
+        "last": numbers[-1],
+    }
+
+
+# =========================================================
+# 5. INDIVIDUAL COLUMN ANALYSIS
+# =========================================================
+
+def analyze_column_data(dataframe, column):
+
+    values = get_numeric_series(
+        dataframe,
+        column
+    )
+
+    valid_values = values.dropna().tolist()
+
+    summary = summarize_values(valid_values)
+
+    trend = calculate_trend(valid_values)
+
+    total_rows = len(dataframe)
+
+    missing_count = total_rows - len(valid_values)
+
+    missing_percentage = (
+        (missing_count / total_rows) * 100
+        if total_rows
+        else 0
+    )
+
+    return {
+        "column": column,
+        "unit": detect_unit(column),
+        "summary": summary,
+        "trend": trend,
+        "missing_count": missing_count,
+        "missing_percentage": round(
+            missing_percentage,
+            2
+        ),
+        "valid_count": len(valid_values),
+    }
+
+
+# =========================================================
+# 6. ROW-ORIENTED DATA ANALYSIS
+# =========================================================
+
+def analyze_row_data(dataframe):
+
+    """
+    Detect common scanner formats where parameters are listed
+    vertically instead of being separate columns.
+
+    Example:
+    Parameter | Value | Unit
+    RPM       | 750   | rpm
+    Coolant   | 92    | °C
+    """
+
+    if dataframe.empty:
+        return []
+
+    column_lookup = {
+        str(column).strip().lower(): column
+        for column in dataframe.columns
+    }
+
+    parameter_candidates = [
+        "parameter",
+        "name",
+        "pid",
+        "description",
+        "data item",
+        "item",
+    ]
+
+    value_candidates = [
+        "value",
+        "actual value",
+        "current value",
+        "reading",
+        "data",
+    ]
+
+    unit_candidates = [
+        "unit",
+        "units",
+    ]
+
+    parameter_column = next(
+        (
+            column_lookup[key]
+            for key in parameter_candidates
+            if key in column_lookup
+        ),
+        None
+    )
+
+    value_column = next(
+        (
+            column_lookup[key]
+            for key in value_candidates
+            if key in column_lookup
+        ),
+        None
+    )
+
+    unit_column = next(
+        (
+            column_lookup[key]
+            for key in unit_candidates
+            if key in column_lookup
+        ),
+        None
+    )
+
+    if not parameter_column or not value_column:
+        return []
+
+    results = []
+
+    for _, row in dataframe.iterrows():
+
+        parameter_name = row.get(parameter_column)
+
+        value = row.get(value_column)
+
+        unit = (
+            row.get(unit_column)
+            if unit_column
+            else None
+        )
+
+        if pd.isna(parameter_name):
+            continue
+
+        numeric_value = clean_number(value)
+
+        results.append({
+            "parameter": str(parameter_name).strip(),
+            "value": numeric_value,
+            "raw_value": str(value),
+            "unit": (
+                str(unit).strip()
+                if unit is not None and not pd.isna(unit)
+                else None
+            ),
+        })
+
+    return results
+
+
+# =========================================================
+# 7. PARAMETER MAPPING
+# =========================================================
+
+def build_parameter_mapping(dataframe, module=None):
+
+    columns = list(dataframe.columns)
+
+    units = {
+        column: detect_unit(column)
+        for column in columns
+    }
+
+    try:
+        mapped = map_columns(
+            columns,
+            module=module,
+            units=units
+        )
+
+    except Exception as error:
+
+        mapped = {}
+
+        for column in columns:
+
+            try:
+                mapped[column] = map_parameter(
+                    column,
+                    module=module,
+                    unit=units.get(column)
+                )
+
+            except Exception:
+                mapped[column] = {
+                    "status": "Needs Review",
+                    "standard_name": None,
+                    "raw_name": column,
+                    "reason": "Mapping could not be completed.",
+                }
+
+    return mapped
+
+
+def separate_confirmed_and_review(mapped_columns):
+
+    confirmed = {}
+    needs_review = {}
+    unmapped = {}
+
+    for raw_name, result in mapped_columns.items():
+
+        if not isinstance(result, dict):
+            unmapped[raw_name] = result
+            continue
+
+        status = result.get("status", "")
+
+        if status == "Confirmed":
+
+            standard_name = result.get("standard_name")
+
+            if standard_name:
+                confirmed[raw_name] = result
+            else:
+                unmapped[raw_name] = result
+
+        elif status == "Needs Review":
+            needs_review[raw_name] = result
+
+        else:
+            unmapped[raw_name] = result
+
+    return confirmed, needs_review, unmapped
+
+
+# =========================================================
+# 8. REQUIRED PARAMETER CHECK
+# =========================================================
 
 def check_required_parameters(
-    detected,
-    required_parameters=None
+    required_parameters,
+    confirmed_parameters
 ):
 
-    if not required_parameters:
-        return {
-            "required": [],
-            "found": [],
-            "missing": []
-        }
+    required_parameters = required_parameters or []
 
-    found_keys = set()
+    confirmed_names = set()
 
-    for item in detected.values():
-        key = item.get("parameter_key")
-        if key:
-            found_keys.add(key)
+    for result in confirmed_parameters.values():
 
-    found = []
-    missing = []
+        if isinstance(result, dict):
 
-    for parameter in required_parameters:
+            name = result.get("standard_name")
 
-        if parameter in found_keys:
-            found.append(parameter)
-        else:
-            missing.append(parameter)
+            if name:
+                confirmed_names.add(name)
+
+    missing = [
+        parameter
+        for parameter in required_parameters
+        if parameter not in confirmed_names
+    ]
+
+    available = [
+        parameter
+        for parameter in required_parameters
+        if parameter in confirmed_names
+    ]
 
     return {
         "required": required_parameters,
-        "found": found,
-        "missing": missing
+        "available": available,
+        "missing": missing,
+        "complete": len(missing) == 0,
     }
 
 
-# ============================================================
-# CONDITION COMPARISON
-# ============================================================
+# =========================================================
+# 9. CONDITION COMPARISON
+# =========================================================
 
 def compare_conditions(
-    df,
-    detected,
-    condition_column
+    dataframe,
+    condition_column=None,
+    parameter_columns=None
 ):
 
-    comparisons = {}
+    """
+    Compare numeric parameters across operating conditions.
 
-    if (
-        condition_column not in df.columns
-        or condition_column is None
-    ):
-        return comparisons
+    Example:
+    Idle vs Acceleration
+    Engine OFF vs Engine ON
 
-    conditions = df[condition_column].dropna().unique()
+    This is descriptive comparison, not an OEM pass/fail test.
+    """
 
-    if len(conditions) < 2:
-        return comparisons
+    if not condition_column:
+        return {}
 
-    for column_name, parameter_data in detected.items():
+    if condition_column not in dataframe.columns:
+        return {}
 
-        if column_name not in df.columns:
-            continue
+    parameter_columns = parameter_columns or []
 
-        parameter_comparison = {}
+    results = {}
+
+    conditions = dataframe[
+        condition_column
+    ].dropna().unique()
+
+    for column in parameter_columns:
+
+        condition_results = {}
 
         for condition in conditions:
 
-            subset = df[
-                df[condition_column] == condition
-            ][column_name]
+            subset = dataframe[
+                dataframe[condition_column] == condition
+            ]
 
-            summary = summarize_values(
-                subset.tolist(),
-                parameter_data.get("parameter_key")
+            values = get_numeric_series(
+                subset,
+                column
+            ).dropna().tolist()
+
+            condition_results[str(condition)] = (
+                summarize_values(values)
             )
 
-            parameter_comparison[str(condition)] = summary
+        results[column] = condition_results
 
-        comparisons[column_name] = parameter_comparison
-
-    return comparisons
+    return results
 
 
-# ============================================================
-# MAIN CSV ANALYSIS
-# ============================================================
+# =========================================================
+# 10. DATA QUALITY CHECK
+# =========================================================
+
+def check_data_quality(dataframe):
+
+    total_rows = len(dataframe)
+    total_columns = len(dataframe.columns)
+
+    if total_rows == 0 or total_columns == 0:
+
+        return {
+            "status": "Invalid",
+            "total_rows": total_rows,
+            "total_columns": total_columns,
+            "duplicate_rows": 0,
+            "empty_cells": 0,
+            "empty_percentage": 100,
+            "warnings": ["No usable CSV data found."],
+        }
+
+    duplicate_rows = int(
+        dataframe.duplicated().sum()
+    )
+
+    empty_cells = int(
+        dataframe.isna().sum().sum()
+    )
+
+    total_cells = total_rows * total_columns
+
+    empty_percentage = (
+        (empty_cells / total_cells) * 100
+        if total_cells
+        else 0
+    )
+
+    warnings = []
+
+    if duplicate_rows:
+        warnings.append(
+            f"{duplicate_rows} duplicate rows detected."
+        )
+
+    if empty_cells:
+        warnings.append(
+            f"{empty_cells} empty cells detected."
+        )
+
+    if total_rows < 2:
+        warnings.append(
+            "Only one data row is available. Trend analysis is limited."
+        )
+
+    if total_columns < 2:
+        warnings.append(
+            "Very few columns detected."
+        )
+
+    status = (
+        "Good"
+        if empty_percentage < 20 and total_rows >= 2
+        else "Review Required"
+    )
+
+    return {
+        "status": status,
+        "total_rows": total_rows,
+        "total_columns": total_columns,
+        "duplicate_rows": duplicate_rows,
+        "empty_cells": empty_cells,
+        "empty_percentage": round(
+            empty_percentage,
+            2
+        ),
+        "warnings": warnings,
+    }
+
+
+# =========================================================
+# 11. MAIN CSV ANALYSIS
+# =========================================================
 
 def analyze_csv(
     uploaded_file,
     required_parameters=None,
     condition_column=None,
-    module=""
+    module=None,
+    complaint=None
 ):
 
-    df = read_scanner_csv(uploaded_file)
+    dataframe = read_scanner_csv(uploaded_file)
 
-    if df.empty:
-        raise ValueError("CSV file contains no data rows.")
+    file_name = getattr(
+        uploaded_file,
+        "name",
+        "scanner_data.csv"
+    )
 
-    time_column = find_time_column(df)
+    time_column = find_time_column(dataframe)
 
-    # Detect whether the CSV is column-based or row-based.
-    column_result = analyze_column_data(
-        df,
+    row_data = analyze_row_data(dataframe)
+
+    mapped_columns = build_parameter_mapping(
+        dataframe,
         module=module
     )
 
-    row_result = analyze_row_data(
-        df,
-        module=module
+    confirmed, needs_review, unmapped = (
+        separate_confirmed_and_review(
+            mapped_columns
+        )
     )
 
-    # Choose the layout with more confirmed parameters.
-    if len(row_result["detected"]) > len(column_result["detected"]):
-        selected = row_result
-        csv_layout = "Row Based"
-    else:
-        selected = column_result
-        csv_layout = "Column Based"
+    detected = {}
 
-    detected = selected["detected"]
-    unmapped = selected["unmapped"]
-    needs_review = selected["needs_review"]
-    mapping_details = selected["mapping_details"]
+    for raw_column, mapping in confirmed.items():
+
+        standard_name = mapping.get("standard_name")
+
+        if not standard_name:
+            continue
+
+        detected[standard_name] = {
+            "raw_column": raw_column,
+            "mapping": mapping,
+            "analysis": analyze_column_data(
+                dataframe,
+                raw_column
+            ),
+        }
+
+    if required_parameters is None:
+
+        try:
+            required_parameters = (
+                default_parameter_requirements(
+                    module or "",
+                    complaint or ""
+                )
+            )
+
+        except Exception:
+            required_parameters = []
 
     required_check = check_required_parameters(
-        detected,
-        required_parameters
+        required_parameters,
+        confirmed
     )
 
-    condition_comparisons = {}
+    numeric_columns = [
+        column
+        for column in dataframe.columns
+        if get_numeric_series(
+            dataframe,
+            column
+        ).notna().any()
+    ]
 
-    if condition_column:
-        condition_comparisons = compare_conditions(
-            df,
-            detected,
-            condition_column
-        )
-
-    total_parameters = len(mapping_details)
-
-    confirmed_count = sum(
-        1 for item in mapping_details
-        if item["status"] == "Confirmed"
+    condition_comparisons = compare_conditions(
+        dataframe,
+        condition_column=condition_column,
+        parameter_columns=numeric_columns
     )
 
-    review_count = len(needs_review)
-    unmapped_count = len(unmapped)
-
-    data_quality = {
-        "total_rows": len(df),
-        "total_columns": len(df.columns),
-        "total_parameters": total_parameters,
-        "confirmed_parameters": confirmed_count,
-        "needs_review": review_count,
-        "unmapped_parameters": unmapped_count,
-        "missing_cells": int(df.isna().sum().sum()),
-        "duplicate_rows": int(df.duplicated().sum()),
-        "csv_layout": csv_layout
-    }
-
-    mapping_summary = {
-        "total": total_parameters,
-        "confirmed": confirmed_count,
-        "needs_review": review_count,
-        "unmapped": unmapped_count
-    }
+    data_quality = check_data_quality(
+        dataframe
+    )
 
     try:
-        external_mapping_summary = get_mapping_summary()
+        mapping_summary = get_mapping_summary(
+            mapped_columns
+        )
+
     except Exception:
-        external_mapping_summary = None
+        mapping_summary = {
+            "confirmed": len(confirmed),
+            "needs_review": len(needs_review),
+            "unmapped": len(unmapped),
+        }
+
+    summary = {
+        "total_rows": len(dataframe),
+        "total_columns": len(dataframe.columns),
+        "confirmed_parameters": len(confirmed),
+        "parameters_needing_review": len(needs_review),
+        "unmapped_parameters": len(unmapped),
+        "required_parameters_available": len(
+            required_check["available"]
+        ),
+        "required_parameters_missing": len(
+            required_check["missing"]
+        ),
+        "data_quality": data_quality["status"],
+    }
 
     return {
-        "dataframe": df,
-        "rows": df.to_dict(orient="records"),
-        "columns": list(df.columns),
+        "dataframe": dataframe,
+        "rows": row_data,
+        "columns": list(dataframe.columns),
         "detected": detected,
-        "unmapped": unmapped,
+        "confirmed": confirmed,
         "needs_review": needs_review,
-        "mapping_details": mapping_details,
+        "unmapped": unmapped,
+        "mapped_columns": mapped_columns,
         "mapping_summary": mapping_summary,
-        "saved_mapping_summary": external_mapping_summary,
-        "summary": {
-            "total_rows": len(df),
-            "total_columns": len(df.columns),
-            "detected_parameters": len(detected),
-            "unmapped_parameters": len(unmapped)
-        },
+        "summary": summary,
         "time_column": time_column,
         "required_parameters": required_check,
         "condition_comparisons": condition_comparisons,
-        "file_name": getattr(
-            uploaded_file,
-            "name",
-            "scanner_data.csv"
-        ),
+        "file_name": file_name,
         "data_quality": data_quality,
-        "csv_layout": csv_layout
     }
 
 
-# ============================================================
-# CSV DATA FOR AI ANALYSIS
-# ============================================================
+# =========================================================
+# 12. AI-READY CSV SUMMARY
+# =========================================================
 
-def get_csv_text_for_ai(df, max_rows=100):
+def get_csv_text_for_ai(analysis):
 
-    if df is None or df.empty:
-        return "No CSV data available."
-
-    limited_df = df.head(max_rows)
-
-    return limited_df.to_csv(index=False)
-
-
-# ============================================================
-# BUILD AI SUMMARY
-# ============================================================
-
-def build_csv_ai_summary(analysis_result):
-
-    if not analysis_result:
-        return "No CSV analysis available."
+    if not isinstance(analysis, dict):
+        return "CSV analysis data is unavailable."
 
     lines = []
 
-    lines.append("SCANNER CSV ANALYSIS")
-    lines.append("====================")
+    lines.append("DOCTOR CAR - SCANNER CSV ANALYSIS")
+    lines.append("=" * 45)
 
     lines.append(
-        f"CSV Layout: {analysis_result.get('csv_layout', 'Unknown')}"
+        f"File: {analysis.get('file_name', 'Unknown')}"
     )
 
-    quality = analysis_result.get("data_quality", {})
+    summary = analysis.get("summary", {})
 
     lines.append(
-        f"Rows: {quality.get('total_rows', 0)}"
-    )
-
-    lines.append(
-        f"Columns: {quality.get('total_columns', 0)}"
+        f"Rows: {summary.get('total_rows', 0)}"
     )
 
     lines.append(
-        f"Missing Cells: {quality.get('missing_cells', 0)}"
+        f"Columns: {summary.get('total_columns', 0)}"
     )
 
     lines.append(
-        f"Duplicate Rows: {quality.get('duplicate_rows', 0)}"
-    )
-
-    lines.append("")
-    lines.append("PARAMETER MAPPING")
-    lines.append("-----------------")
-
-    mapping_summary = analysis_result.get(
-        "mapping_summary",
-        {}
-    )
-
-    lines.append(
-        f"Confirmed: {mapping_summary.get('confirmed', 0)}"
-    )
-
-    lines.append(
-        f"Needs Review: {mapping_summary.get('needs_review', 0)}"
-    )
-
-    lines.append(
-        f"Unmapped: {mapping_summary.get('unmapped', 0)}"
+        f"Data Quality: {summary.get('data_quality', 'Unknown')}"
     )
 
     lines.append("")
     lines.append("CONFIRMED PARAMETERS")
-    lines.append("--------------------")
+    lines.append("-" * 30)
 
-    detected = analysis_result.get("detected", {})
+    detected = analysis.get("detected", {})
 
     if not detected:
-        lines.append("No confirmed parameters detected.")
-
-    for column_name, item in detected.items():
-
-        summary = item.get("summary", {})
-
         lines.append(
-            f"\nParameter: {item.get('standard_name', column_name)}"
+            "No confirmed parameters were identified."
+        )
+
+    for standard_name, item in detected.items():
+
+        details = item.get("analysis", {})
+
+        value_summary = details.get(
+            "summary",
+            {}
+        )
+
+        trend = details.get(
+            "trend",
+            {}
         )
 
         lines.append(
-            f"Original Scanner Name: {column_name}"
-        )
-
-        lines.append(
-            f"Minimum: {summary.get('min')}"
-        )
-
-        lines.append(
-            f"Maximum: {summary.get('max')}"
-        )
-
-        lines.append(
-            f"Average: {summary.get('average')}"
-        )
-
-        lines.append(
-            f"First Value: {summary.get('first')}"
-        )
-
-        lines.append(
-            f"Last Value: {summary.get('last')}"
-        )
-
-        lines.append(
-            f"Trend: {summary.get('trend')}"
+            f"{standard_name}: "
+            f"minimum={value_summary.get('minimum')}, "
+            f"maximum={value_summary.get('maximum')}, "
+            f"average={value_summary.get('average')}, "
+            f"first={value_summary.get('first')}, "
+            f"last={value_summary.get('last')}, "
+            f"trend={trend.get('trend')}"
         )
 
     lines.append("")
     lines.append("PARAMETERS NEEDING REVIEW")
-    lines.append("-------------------------")
+    lines.append("-" * 30)
 
-    needs_review = analysis_result.get("needs_review", [])
+    for raw_name, result in (
+        analysis.get("needs_review", {}).items()
+    ):
 
-    if not needs_review:
-        lines.append("None.")
-
-    for item in needs_review:
         lines.append(
-            f"{item.get('raw_name')} -> "
-            f"{item.get('standard_name')} "
-            f"(Status: {item.get('status')})"
+            f"{raw_name}: "
+            f"{result.get('standard_name') or 'Not identified'}"
         )
 
     lines.append("")
     lines.append("UNMAPPED PARAMETERS")
-    lines.append("-------------------")
+    lines.append("-" * 30)
 
-    unmapped = analysis_result.get("unmapped", [])
+    for raw_name in analysis.get("unmapped", {}):
+        lines.append(str(raw_name))
 
-    if not unmapped:
-        lines.append("None.")
-
-    for item in unmapped:
-        lines.append(str(item))
+    required = analysis.get(
+        "required_parameters",
+        {}
+    )
 
     lines.append("")
-    lines.append("IMPORTANT DIAGNOSTIC RULES")
-    lines.append("--------------------------")
+    lines.append("REQUIRED PARAMETER CHECK")
+    lines.append("-" * 30)
+
     lines.append(
-        "Do not assume a missing parameter is zero."
+        "Available: "
+        + ", ".join(required.get("available", []))
     )
+
     lines.append(
-        "Do not treat an unconfirmed parameter mapping as verified data."
+        "Missing: "
+        + ", ".join(required.get("missing", []))
     )
-    lines.append(
-        "Do not diagnose a failed component using a DTC or one live-data "
-        "reading alone."
+
+    quality = analysis.get(
+        "data_quality",
+        {}
     )
+
+    lines.append("")
+    lines.append("DATA QUALITY WARNINGS")
+
+    for warning in quality.get("warnings", []):
+        lines.append(f"- {warning}")
+
+    lines.append("")
     lines.append(
-        "Consider vehicle details, operating conditions, DTCs, freeze-frame "
-        "data and physical test results before suggesting a root cause."
+        "DIAGNOSTIC LIMITATION: "
+        "CSV trends alone do not establish component failure. "
+        "Interpret values using vehicle-specific specifications, "
+        "operating conditions, DTCs, freeze-frame data and "
+        "physical confirmation tests. Missing values must not "
+        "be treated as zero or normal."
     )
 
     return "\n".join(lines)
+
+
+def build_csv_ai_summary(analysis):
+
+    return get_csv_text_for_ai(analysis)
+
+
+# =========================================================
+# 13. QUICK SELF-TEST
+# =========================================================
+
+def run_csv_analyzer_self_test():
+
+    test_data = pd.DataFrame({
+        "Engine RPM (rpm)": [
+            "750",
+            "780",
+            "820",
+        ],
+        "Coolant Temperature (°C)": [
+            "88",
+            "90",
+            "92",
+        ],
+        "Fuel Pressure (kPa)": [
+            "350",
+            "345",
+            "340",
+        ],
+    })
+
+    result = analyze_csv(
+        test_data,
+        required_parameters=[]
+    )
+
+    return {
+        "success": isinstance(result, dict),
+        "rows": result.get("summary", {}).get("total_rows"),
+        "columns": result.get("summary", {}).get("total_columns"),
+        "confirmed_parameters": result.get(
+            "summary",
+            {}
+        ).get("confirmed_parameters"),
+    }
