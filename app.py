@@ -207,4 +207,47 @@ if ecm_file is not None and ecm_file.name.endswith(".csv"):
           default=numeric_cols[:3] if len(numeric_cols) >= 3 else numeric_cols,
       )
       if selected_columns:
-        st.line
+        st.line_chart(df[selected_columns])
+  except Exception as e:
+    st.error(f"Could not parse CSV for sensor plotting: {e}")
+
+# 3. Ask AI & Interactive Clarifications
+st.header(
+    "3. Ask AI: Primary Complaint & Interactive Diagnostic Clarifications"
+)
+st.markdown(
+    "Enter the exact driver complaint. Answer AI's interactive questions to"
+    " correlate symptoms with live data and achieve 100% diagnostic accuracy."
+)
+
+custom_dtc_input = st.text_input(
+    "Primary Complaint / Observed Symptom",
+    placeholder=(
+        "e.g., Gear shifting delay, Traction light on, AC not cooling, Engine"
+        " vibration"
+    ),
+)
+
+clarification_input = st.text_input(
+    "Interactive Clarification (Answer behavioral details e.g., speed range, gear mode behavior, brake vs acceleration)",
+    placeholder=(
+        "e.g., Delay occurs specifically when shifting from 2nd to 3rd gear under"
+        " load"
+    ),
+)
+
+st.markdown("---")
+if st.button("Analyze Complete Vehicle Health & Generate Professional Report"):
+  if not vehicle_brand or not vehicle_model:
+    st.warning(
+        "Please enter both Vehicle Brand and Model to proceed with AI"
+        " analysis."
+    )
+  else:
+    with st.spinner(
+        "AI Master Diagnostic Engineer is strictly correlating your complaint, files, photos, and interactive answers... Please wait."
+    ):
+
+      complaint_lower = custom_dtc_input.lower()
+
+      if "gear" in complaint_lower or "shift" in complaint
