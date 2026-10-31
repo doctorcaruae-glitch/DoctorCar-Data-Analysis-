@@ -1,200 +1,200 @@
+"""
+Doctor Car - Main Application
 
+Streamlit interface for evidence-based automotive diagnosis.
+
+Connects:
+- parameter_database.py
+- smart_parameter_mapper.py
+- csv_analyzer.py
+- diagnostic_engine.py
+- report_generator.py
+
+Customer-facing reports are generated in English.
+"""
+
+import io
 import os
+import json
 import uuid
 import sqlite3
 from datetime import datetime
 
 import streamlit as st
-import pandas as pd
 
-from pypdf import PdfReader
+from parameter_database import (
+    PARAMETERS,
+    default_parameter_requirements,
+    suggest_modules,
+    get_recommended_tests,
+    get_complaint_diagnostic_summary,
+)
 
-from csv_analyzer import analyze_csv
+from csv_analyzer import (
+    analyze_csv,
+    get_csv_text_for_ai,
+)
 
 from diagnostic_engine import (
     generate_diagnostic_questions,
-    analyze_vehicle
+    analyze_vehicle,
 )
 
 from report_generator import generate_pdf
 
-from parameter_database import (
-    suggest_modules,
-    default_parameter_requirements,
-    get_recommended_tests,
-    get_complaint_diagnostic_summary
-)
 
-
-# ==================================================
-# PAGE CONFIGURATION
-# ==================================================
+# =========================================================
+# 1. APPLICATION CONFIGURATION
+# =========================================================
 
 st.set_page_config(
-    page_title="Doctor Car AI Diagnostic System",
+    page_title="Doctor Car | AI Diagnostics",
     page_icon="🚗",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-
-# ==================================================
-# BRAND DESIGN
-# ==================================================
-
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-color: #F5F7FA;
-    }
-
-    h1, h2, h3 {
-        color: #102B4E;
-    }
-
-    .main-title {
-        color: #102B4E;
-        font-size: 34px;
-        font-weight: 800;
-        text-align: center;
-    }
-
-    .sub-title {
-        color: #D6A84F;
-        text-align: center;
-        font-size: 15px;
-        font-weight: 600;
-    }
-
-    .stButton > button {
-        background-color: #102B4E;
-        color: white;
-        border-radius: 7px;
-        border: none;
-        font-weight: 600;
-    }
-
-    .stButton > button:hover {
-        background-color: #D6A84F;
-        color: #102B4E;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+DB_FILE = "doctor_car_history.db"
 
 
-# ==================================================
-# DATABASE
-# ==================================================
+# =========================================================
+# 2. DATABASE
+# =========================================================
 
-DB_NAME = "doctor_car_history.db"
+def get_db_connection():
 
-
-def get_connection():
     return sqlite3.connect(
-        DB_NAME,
+        DB_FILE,
         check_same_thread=False
     )
 
 
-def initialize_database():
+def initialize_history_database():
 
-    connection = get_connection()
+    connection = get_db_connection()
+
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS inspections (
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS diagnosis_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id TEXT UNIQUE,
             created_at TEXT,
             customer_name TEXT,
             customer_phone TEXT,
-            make TEXT,
-            model TEXT,
-            year TEXT,
-            vin TEXT,
-            mileage TEXT,
-            specification TEXT,
+            vehicle TEXT,
             complaint TEXT,
-            diagnosis TEXT
+            diagnosis TEXT,
+            analysis_mode TEXT
         )
-        """
-    )
+    """)
 
     connection.commit()
     connection.close()
 
 
-def save_inspection(
+def save_diagnosis(
     report_id,
     customer_name,
     customer_phone,
     vehicle,
     complaint,
-    diagnosis
+    diagnosis,
+    analysis_mode
 ):
 
-    connection = get_connection()
+    connection = get_db_connection()
+
     cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        INSERT OR REPLACE INTO inspections (
+    cursor.execute("""
+        INSERT OR REPLACE INTO diagnosis_history (
             report_id,
             created_at,
             customer_name,
             customer_phone,
-            make,
-            model,
-            year,
-            vin,
-            mileage,
-            specification,
+            vehicle,
             complaint,
-            diagnosis
+            diagnosis,
+            analysis_mode
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            report_id,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            customer_name,
-            customer_phone,
-            vehicle.get("make"),
-            vehicle.get("model"),
-            vehicle.get("year"),
-            vehicle.get("vin"),
-            vehicle.get("mileage"),
-            vehicle.get("specification"),
-            complaint,
-            diagnosis
-        )
-    )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        report_id,
+        datetime.now().isoformat(timespec="seconds"),
+        customer_name,
+        customer_phone,
+        json.dumps(vehicle, ensure_ascii=False),
+        complaint,
+        diagnosis,
+        analysis_mode,
+    ))
 
     connection.commit()
     connection.close()
 
 
-initialize_database()
+def get_diagnosis_history():
+
+    connection = get_db_connection()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT
+            report_id,
+            created_at,
+            customer_name,
+            vehicle,
+            complaint,
+            analysis_mode
+        FROM diagnosis_history
+        ORDER BY id DESC
+        LIMIT 200
+    """)
+
+    rows = cursor.fetchall()
+
+    connection.close()
+
+    return rows
 
 
-# ==================================================
-# SESSION STATE
-# ==================================================
+def get_history_record(report_id):
+
+    connection = get_db_connection()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM diagnosis_history
+        WHERE report_id = ?
+    """, (report_id,))
+
+    record = cursor.fetchone()
+
+    connection.close()
+
+    return record
+
+
+initialize_history_database()
+
+
+# =========================================================
+# 3. SESSION STATE
+# =========================================================
 
 DEFAULT_STATE = {
-    "diagnostic_questions": "",
-    "diagnostic_result": "",
-    "generated_pdf": None,
-    "current_report_id": None,
-    "vehicle": None,
-    "customer_name": "",
-    "customer_phone": "",
-    "complaint": "",
-    "recommendations_loaded": False
+    "diagnosis_result": None,
+    "report_id": None,
+    "pdf_bytes": None,
+    "csv_results": {},
+    "uploaded_scan_text": "",
+    "selected_page": "New Diagnosis",
 }
+
 
 for key, value in DEFAULT_STATE.items():
 
@@ -202,250 +202,201 @@ for key, value in DEFAULT_STATE.items():
         st.session_state[key] = value
 
 
-# ==================================================
-# HELPER FUNCTIONS
-# ==================================================
+# =========================================================
+# 4. HELPER FUNCTIONS
+# =========================================================
 
-def safe_display(value):
-    """
-    Display recommendation data safely,
-    whether it is text, list or dictionary.
-    """
+def safe_string(value):
 
     if value is None:
-        st.write("No information available.")
-    elif isinstance(value, (dict, list, tuple)):
-        st.json(value)
-    else:
-        st.write(value)
+        return ""
+
+    return str(value).strip()
 
 
-def extract_pdf_text(pdf_file):
+def vehicle_description(vehicle):
+
+    parts = [
+        vehicle.get("year", ""),
+        vehicle.get("make", ""),
+        vehicle.get("model", ""),
+        vehicle.get("engine", ""),
+    ]
+
+    return " ".join(
+        str(part)
+        for part in parts
+        if part
+    )
+
+
+def safe_recommendation(function, *args):
+
+    try:
+        return function(*args)
+
+    except Exception:
+        return None
+
+
+def extract_pdf_text(uploaded_pdf):
+
+    if uploaded_pdf is None:
+        return ""
 
     try:
 
-        pdf_file.seek(0)
-        reader = PdfReader(pdf_file)
+        from pypdf import PdfReader
 
-        extracted_text = []
+        uploaded_pdf.seek(0)
 
-        for page_number, page in enumerate(reader.pages):
+        reader = PdfReader(uploaded_pdf)
 
-            page_text = page.extract_text() or ""
+        pages = []
 
-            if page_text.strip():
+        for page in reader.pages:
 
-                extracted_text.append(
-                    f"PAGE {page_number + 1}\n{page_text}"
-                )
+            text = page.extract_text()
 
-        return "\n\n".join(extracted_text)
+            if text:
+                pages.append(text)
+
+        return "\n\n".join(pages)
 
     except Exception as error:
 
-        st.error(f"Unable to read PDF: {error}")
-        return ""
+        return (
+            "PDF text extraction failed: "
+            + str(error)
+        )
+
+
+def make_report_id():
+
+    timestamp = datetime.now().strftime("%Y%m%d")
+
+    unique_part = uuid.uuid4().hex[:6].upper()
+
+    return f"DC-{timestamp}-{unique_part}"
+
+
+def normalize_pdf_output(result):
+
+    if result is None:
+        return None
+
+    if isinstance(result, bytes):
+        return result
+
+    if isinstance(result, bytearray):
+        return bytes(result)
+
+    if hasattr(result, "getvalue"):
+
+        try:
+            return result.getvalue()
+        except Exception:
+            pass
+
+    if isinstance(result, str):
+
+        if os.path.exists(result):
+
+            with open(result, "rb") as file:
+                return file.read()
+
+    return None
+
+
+def show_status(status):
+
+    if status == "Confirmed":
+        st.success(status)
+
+    elif status == "Strongly Suspected":
+        st.warning(status)
+
+    elif status == "Possible":
+        st.info(status)
+
+    else:
+        st.warning(status)
 
 
 def reset_diagnosis():
 
-    st.session_state.diagnostic_questions = ""
-    st.session_state.diagnostic_result = ""
-    st.session_state.generated_pdf = None
-    st.session_state.current_report_id = None
-    st.session_state.recommendations_loaded = False
+    st.session_state.diagnosis_result = None
+    st.session_state.report_id = None
+    st.session_state.pdf_bytes = None
+    st.session_state.csv_results = {}
+    st.session_state.uploaded_scan_text = ""
 
 
-def get_complaint_recommendations(vehicle, complaint):
+# =========================================================
+# 5. SIDEBAR
+# =========================================================
 
-    recommendations = {}
+with st.sidebar:
 
-    try:
-        recommendations["modules"] = suggest_modules(complaint)
-    except Exception as error:
-        recommendations["modules_error"] = str(error)
+    st.image(
+        "https://placehold.co/400x120/102B50/FFFFFF?text=DOCTOR+CAR",
+        use_container_width=True
+    )
 
-    try:
-        recommendations["parameters"] = (
-            default_parameter_requirements(
-                vehicle,
-                complaint
-            )
-        )
-    except Exception as error:
-        recommendations["parameters_error"] = str(error)
+    st.title("Doctor Car")
 
-    try:
-        recommendations["tests"] = get_recommended_tests(complaint)
-    except Exception as error:
-        recommendations["tests_error"] = str(error)
+    st.caption(
+        "Professional Automotive Diagnostic Platform"
+    )
 
-    try:
-        recommendations["summary"] = (
-            get_complaint_diagnostic_summary(complaint)
-        )
-    except Exception as error:
-        recommendations["summary_error"] = str(error)
+    selected_page = st.radio(
+        "Navigation",
+        [
+            "New Diagnosis",
+            "Diagnosis History",
+            "System Information",
+        ],
+        key="navigation",
+    )
 
-    return recommendations
+    st.divider()
 
+    st.caption("Evidence-Based Vehicle Diagnostics")
 
-# ==================================================
-# HEADER
-# ==================================================
-
-st.markdown(
-    '<div class="main-title">DOCTOR CAR</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="sub-title">AI-POWERED VEHICLE DIAGNOSTIC SYSTEM</div>',
-    unsafe_allow_html=True
-)
-
-st.divider()
+    st.caption("AI-Assisted Analysis")
 
 
-# ==================================================
-# SIDEBAR
-# ==================================================
+# =========================================================
+# 6. NEW DIAGNOSIS PAGE
+# =========================================================
 
-st.sidebar.title("Doctor Car")
+if selected_page == "New Diagnosis":
 
-page = st.sidebar.radio(
-    "Navigation",
-    [
-        "New Diagnosis",
-        "Inspection History",
-        "System Information"
-    ]
-)
+    st.title("New Vehicle Diagnosis")
 
+    st.caption(
+        "Enter vehicle details and collect diagnostic evidence."
+    )
 
-# ==================================================
-# VEHICLE INFORMATION
-# ==================================================
+    if st.button(
+        "Start New Diagnosis",
+        use_container_width=False
+    ):
 
-def get_vehicle_data():
+        reset_diagnosis()
 
-    vehicle = {}
+    # -----------------------------------------------------
+    # CUSTOMER DETAILS
+    # -----------------------------------------------------
 
-    st.subheader("1. Vehicle Information")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        vehicle["make"] = st.text_input(
-            "Vehicle Make *",
-            placeholder="Toyota, Nissan, BMW..."
-        )
-
-        vehicle["model"] = st.text_input(
-            "Vehicle Model *",
-            placeholder="Camry, Patrol, X5..."
-        )
-
-        vehicle["year"] = st.text_input(
-            "Model Year *",
-            placeholder="2020"
-        )
-
-        vehicle["vin"] = st.text_input(
-            "VIN / Chassis Number",
-            placeholder="17-character VIN"
-        )
-
-    with col2:
-
-        vehicle["mileage"] = st.text_input(
-            "Current Mileage",
-            placeholder="85000 km"
-        )
-
-        vehicle["specification"] = st.selectbox(
-            "Vehicle Specification",
-            [
-                "GCC",
-                "USA",
-                "Canada",
-                "Japan",
-                "Europe",
-                "Korea",
-                "Other / Unknown"
-            ]
-        )
-
-        vehicle["fuel_type"] = st.selectbox(
-            "Fuel Type",
-            [
-                "Petrol",
-                "Diesel",
-                "Hybrid",
-                "Plug-in Hybrid",
-                "Electric",
-                "Other / Unknown"
-            ]
-        )
-
-        vehicle["engine_capacity"] = st.text_input(
-            "Engine Capacity",
-            placeholder="2.0L / 3.5L"
-        )
-
-    with col3:
-
-        vehicle["engine_code"] = st.text_input(
-            "Engine Code",
-            placeholder="2AR-FE / QR25DE"
-        )
-
-        vehicle["engine_power"] = st.text_input(
-            "Engine Power",
-            placeholder="HP / kW (if known)"
-        )
-
-        vehicle["transmission"] = st.selectbox(
-            "Transmission",
-            [
-                "Automatic",
-                "Manual",
-                "CVT",
-                "DCT",
-                "AMT",
-                "Other / Unknown"
-            ]
-        )
-
-        vehicle["drivetrain"] = st.selectbox(
-            "Drivetrain",
-            [
-                "FWD",
-                "RWD",
-                "AWD",
-                "4WD",
-                "Other / Unknown"
-            ]
-        )
-
-    return vehicle
-
-
-# ==================================================
-# CUSTOMER INFORMATION
-# ==================================================
-
-def get_customer_data():
-
-    st.subheader("2. Customer Information")
+    st.subheader("1. Customer Information")
 
     col1, col2 = st.columns(2)
 
     with col1:
 
         customer_name = st.text_input(
-            "Customer Name *"
+            "Customer Name"
         )
 
     with col2:
@@ -454,507 +405,488 @@ def get_customer_data():
             "Customer Phone"
         )
 
-    return customer_name, customer_phone
+    # -----------------------------------------------------
+    # VEHICLE DETAILS
+    # -----------------------------------------------------
 
+    st.subheader("2. Vehicle Information")
 
-# ==================================================
-# NEW DIAGNOSIS PAGE
-# ==================================================
+    col1, col2 = st.columns(2)
 
-if page == "New Diagnosis":
+    with col1:
 
-    st.title("New Vehicle Diagnosis")
-
-    with st.form("vehicle_information_form"):
-
-        vehicle = get_vehicle_data()
-
-        customer_name, customer_phone = get_customer_data()
-
-        st.subheader("3. Customer Complaint")
-
-        complaint = st.text_area(
-            "Describe the vehicle problem / customer complaint",
-            height=120,
-            placeholder=(
-                "Example: Engine vibration at idle, "
-                "check engine light ON, poor acceleration..."
-            )
+        year = st.text_input(
+            "Manufacturing Year"
         )
 
-        basic_submit = st.form_submit_button(
-            "Save Vehicle Information"
+        make = st.text_input(
+            "Vehicle Make"
         )
 
-    if basic_submit:
-
-        if (
-            not vehicle["make"].strip()
-            or not vehicle["model"].strip()
-            or not vehicle["year"].strip()
-        ):
-
-            st.error("Please enter Make, Model and Year.")
-
-        elif not customer_name.strip():
-
-            st.error("Please enter customer name.")
-
-        elif not complaint.strip():
-
-            st.error("Please enter customer complaint.")
-
-        else:
-
-            st.session_state.vehicle = vehicle
-            st.session_state.customer_name = customer_name
-            st.session_state.customer_phone = customer_phone
-            st.session_state.complaint = complaint
-
-            reset_diagnosis()
-
-            st.success(
-                "Vehicle and customer information saved."
-            )
-
-    # --------------------------------------------------
-    # CONTINUE AFTER SAVING BASIC INFORMATION
-    # --------------------------------------------------
-
-    if st.session_state.vehicle is not None:
-
-        vehicle = st.session_state.vehicle
-        customer_name = st.session_state.customer_name
-        customer_phone = st.session_state.customer_phone
-        complaint = st.session_state.complaint
-
-        st.divider()
-
-        # --------------------------------------------------
-        # COMPLAINT-BASED RECOMMENDATIONS
-        # --------------------------------------------------
-
-        st.subheader("4. Complaint-Based Diagnostic Plan")
-
-        st.caption(
-            "The system recommends relevant modules, "
-            "Live Data parameters and tests based on the complaint."
+        model = st.text_input(
+            "Vehicle Model"
         )
 
-        if st.button(
-            "Generate Recommended Diagnostic Plan",
-            key="generate_recommendations"
-        ):
-
-            with st.spinner(
-                "Preparing complaint-based recommendations..."
-            ):
-
-                st.session_state.recommendations = (
-                    get_complaint_recommendations(
-                        vehicle,
-                        complaint
-                    )
-                )
-
-                st.session_state.recommendations_loaded = True
-
-        if st.session_state.recommendations_loaded:
-
-            recommendations = st.session_state.get(
-                "recommendations",
-                {}
-            )
-
-            with st.expander(
-                "Recommended Vehicle Modules",
-                expanded=True
-            ):
-
-                if "modules_error" in recommendations:
-                    st.warning(
-                        recommendations["modules_error"]
-                    )
-                else:
-                    safe_display(
-                        recommendations.get("modules")
-                    )
-
-            with st.expander(
-                "Recommended Live Data Parameters",
-                expanded=True
-            ):
-
-                if "parameters_error" in recommendations:
-                    st.warning(
-                        recommendations["parameters_error"]
-                    )
-                else:
-                    safe_display(
-                        recommendations.get("parameters")
-                    )
-
-            with st.expander(
-                "Recommended Confirmation Tests"
-            ):
-
-                if "tests_error" in recommendations:
-                    st.warning(
-                        recommendations["tests_error"]
-                    )
-                else:
-                    safe_display(
-                        recommendations.get("tests")
-                    )
-
-            with st.expander(
-                "Diagnostic Profile Summary"
-            ):
-
-                if "summary_error" in recommendations:
-                    st.warning(
-                        recommendations["summary_error"]
-                    )
-                else:
-                    safe_display(
-                        recommendations.get("summary")
-                    )
-
-            st.info(
-                "These are diagnostic recommendations, not confirmed "
-                "faults. Select only parameters supported by the "
-                "vehicle and scanner."
-            )
-
-        st.divider()
-
-        # --------------------------------------------------
-        # AI DIAGNOSTIC QUESTIONS
-        # --------------------------------------------------
-
-        st.subheader("5. AI Diagnostic Questions")
-
-        st.caption(
-            "AI prepares questions based on the vehicle and complaint."
+        engine = st.text_input(
+            "Engine"
         )
 
-        if st.button(
-            "Generate Diagnostic Questions",
-            key="generate_questions"
-        ):
+    with col2:
 
-            with st.spinner(
-                "AI is preparing diagnostic questions..."
-            ):
-
-                try:
-
-                    questions = generate_diagnostic_questions(
-                        vehicle,
-                        complaint
-                    )
-
-                    st.session_state.diagnostic_questions = questions
-
-                except Exception as error:
-
-                    st.error(
-                        f"Question generation failed: {error}"
-                    )
-
-        if st.session_state.diagnostic_questions:
-
-            st.markdown(
-                st.session_state.diagnostic_questions
-            )
-
-        answers = st.text_area(
-            "Inspector Answers / Customer Answers",
-            height=160,
-            placeholder=(
-                "Enter customer answers, test results, "
-                "symptoms and inspection observations..."
-            ),
-            key="inspector_answers"
+        vin = st.text_input(
+            "VIN / Chassis Number"
         )
 
-        st.divider()
-
-        # --------------------------------------------------
-        # MODULE CSV UPLOAD
-        # --------------------------------------------------
-
-        st.subheader("6. THINKDIAG 2 Live Data CSV Files")
-
-        st.info(
-            "Upload separate CSV files for the relevant vehicle "
-            "modules. Use the recommended diagnostic plan above "
-            "to decide which parameters to record."
+        mileage = st.text_input(
+            "Odometer Reading"
         )
 
-        modules = [
-            "Engine",
+        fuel_type = st.selectbox(
+            "Fuel Type",
+            [
+                "Petrol",
+                "Diesel",
+                "Hybrid",
+                "Electric",
+                "Other",
+                "Unknown",
+            ]
+        )
+
+        transmission = st.selectbox(
             "Transmission",
-            "ABS/ESC",
-            "SRS",
-            "EPS",
-            "HVAC",
-            "AWD/4WD",
-            "ADAS",
-            "BCM/Body Electrical",
-            "Battery/Charging",
-            "Hybrid/EV",
-            "TPMS",
-            "Other OEM Modules"
-        ]
-
-        module_data = {}
-
-        for module in modules:
-
-            with st.expander(
-                f"{module} - CSV Upload",
-                expanded=(module == "Engine")
-            ):
-
-                uploaded_csv = st.file_uploader(
-                    f"Upload {module} CSV",
-                    type=["csv"],
-                    key=f"csv_{module}"
-                )
-
-                if uploaded_csv is not None:
-
-                    try:
-
-                        uploaded_csv.seek(0)
-                        parsed = analyze_csv(uploaded_csv)
-
-                        module_data[module] = parsed
-
-                        st.success(
-                            f"{module} CSV processed successfully."
-                        )
-
-                        st.write(
-                            "Detected Parameters:",
-                            len(parsed.get("detected", []))
-                        )
-
-                        summary = parsed.get("summary", [])
-
-                        if summary:
-
-                            summary_df = pd.DataFrame(summary)
-
-                            st.dataframe(
-                                summary_df,
-                                use_container_width=True,
-                                hide_index=True
-                            )
-
-                        unmapped = parsed.get("unmapped", [])
-
-                        if unmapped:
-
-                            with st.expander(
-                                "Unmapped CSV Columns"
-                            ):
-
-                                st.write(unmapped)
-
-                        quality = parsed.get(
-                            "data_quality",
-                            {}
-                        )
-
-                        if quality:
-
-                            st.caption(
-                                f"Data quality: {quality}"
-                            )
-
-                    except Exception as error:
-
-                        st.error(
-                            f"Could not process {module} CSV: {error}"
-                        )
-
-        st.divider()
-
-        # --------------------------------------------------
-        # FULL SCAN PDF
-        # --------------------------------------------------
-
-        st.subheader("7. Full Vehicle Scan Report")
-
-        scan_pdf = st.file_uploader(
-            "Upload full scanner scan report PDF",
-            type=["pdf"],
-            key="full_scan_pdf"
+            [
+                "Automatic",
+                "Manual",
+                "CVT",
+                "DCT",
+                "Other",
+                "Unknown",
+            ]
         )
 
-        scan_text = ""
+    vehicle = {
+        "year": year,
+        "make": make,
+        "model": model,
+        "engine": engine,
+        "vin": vin,
+        "mileage": mileage,
+        "fuel_type": fuel_type,
+        "transmission": transmission,
+    }
 
-        if scan_pdf is not None:
+    # -----------------------------------------------------
+    # COMPLAINT
+    # -----------------------------------------------------
 
-            scan_text = extract_pdf_text(scan_pdf)
+    st.subheader("3. Customer Complaint")
 
-            if scan_text:
+    complaint = st.text_area(
+        "Describe the problem",
+        height=130,
+        placeholder=(
+            "Example: Engine stalls while driving. "
+            "Low fuel pressure DTC is stored. "
+            "Engine restarts after adding fuel."
+        )
+    )
+
+    categories = []
+
+    required_parameters = []
+
+    if complaint.strip():
+
+        try:
+
+            profile_summary = (
+                get_complaint_diagnostic_summary(
+                    complaint
+                )
+            )
+
+            st.markdown("**Diagnostic Profile**")
+
+            st.write(
+                profile_summary
+            )
+
+        except Exception:
+
+            profile_summary = None
+
+        try:
+
+            required_parameters = (
+                default_parameter_requirements(
+                    "",
+                    complaint
+                )
+            )
+
+        except Exception:
+
+            required_parameters = []
+
+        try:
+
+            suggested = suggest_modules(
+                complaint
+            )
+
+            st.markdown("**Suggested Diagnostic Modules**")
+
+            st.write(suggested)
+
+        except Exception:
+
+            suggested = []
+
+        try:
+
+            recommended_tests = get_recommended_tests(
+                complaint
+            )
+
+            st.markdown("**Recommended Tests**")
+
+            st.write(recommended_tests)
+
+        except Exception:
+
+            recommended_tests = []
+
+        question_data = generate_diagnostic_questions(
+            vehicle_description(vehicle),
+            complaint
+        )
+
+        with st.expander(
+            "Diagnostic Questions",
+            expanded=True
+        ):
+
+            for question in question_data.get(
+                "questions",
+                []
+            ):
+
+                st.write(f"• {question}")
+
+    else:
+
+        suggested = []
+        recommended_tests = []
+
+    # -----------------------------------------------------
+    # ANSWERS
+    # -----------------------------------------------------
+
+    st.subheader("4. Diagnostic Observations")
+
+    answers = st.text_area(
+        "Answers to diagnostic questions",
+        height=120,
+        placeholder=(
+            "Enter the customer's answers and "
+            "inspector observations."
+        )
+    )
+
+    # -----------------------------------------------------
+    # DTC AND FREEZE FRAME
+    # -----------------------------------------------------
+
+    st.subheader("5. DTC and Freeze Frame")
+
+    dtc_text = st.text_area(
+        "Diagnostic Trouble Codes",
+        height=120,
+        placeholder=(
+            "Example: P0087 - Fuel Rail/System Pressure Too Low"
+        )
+    )
+
+    freeze_frame_text = st.text_area(
+        "Freeze Frame Data",
+        height=120,
+        placeholder=(
+            "Enter RPM, coolant temperature, load, "
+            "fuel pressure and other recorded conditions."
+        )
+    )
+
+    # -----------------------------------------------------
+    # SCANNER DATA
+    # -----------------------------------------------------
+
+    st.subheader("6. Scanner Live Data")
+
+    scan_text = st.text_area(
+        "Additional Scanner Data",
+        height=120,
+        placeholder=(
+            "Paste scanner readings that are not included "
+            "in the CSV uploads."
+        )
+    )
+
+    # -----------------------------------------------------
+    # CSV FILE UPLOADS
+    # -----------------------------------------------------
+
+    st.subheader("7. Upload Scanner CSV Files")
+
+    st.caption(
+        "Upload multiple CSV files. Use a separate module name "
+        "for each file where applicable."
+    )
+
+    csv_count = st.number_input(
+        "Number of CSV files",
+        min_value=0,
+        max_value=10,
+        value=1,
+        step=1
+    )
+
+    module_data = {}
+
+    for index in range(int(csv_count)):
+
+        st.markdown(
+            f"**CSV File {index + 1}**"
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            module_name = st.text_input(
+                "Module / System",
+                key=f"module_{index}",
+                placeholder="Example: Engine / ECM"
+            )
+
+        with col2:
+
+            csv_file = st.file_uploader(
+                "Upload CSV",
+                type=["csv"],
+                key=f"csv_{index}"
+            )
+
+        if csv_file is not None:
+
+            try:
+
+                csv_analysis = analyze_csv(
+                    csv_file,
+                    required_parameters=(
+                        required_parameters
+                    ),
+                    module=module_name,
+                    complaint=complaint
+                )
+
+                module_key = (
+                    module_name.strip()
+                    if module_name.strip()
+                    else f"CSV Module {index + 1}"
+                )
+
+                module_data[module_key] = csv_analysis
 
                 st.success(
-                    "PDF text extracted successfully."
+                    f"{csv_file.name}: CSV analysis completed."
+                )
+
+                summary = csv_analysis.get(
+                    "summary",
+                    {}
+                )
+
+                c1, c2, c3 = st.columns(3)
+
+                c1.metric(
+                    "Confirmed",
+                    summary.get(
+                        "confirmed_parameters",
+                        0
+                    )
+                )
+
+                c2.metric(
+                    "Needs Review",
+                    summary.get(
+                        "parameters_needing_review",
+                        0
+                    )
+                )
+
+                c3.metric(
+                    "Unmapped",
+                    summary.get(
+                        "unmapped_parameters",
+                        0
+                    )
                 )
 
                 with st.expander(
-                    "View Extracted Scan Information"
+                    f"View {csv_file.name} analysis"
                 ):
 
-                    st.text(
-                        scan_text[:10000]
+                    st.json(summary)
+
+                    st.write(
+                        "Missing required parameters:",
+                        csv_analysis.get(
+                            "required_parameters",
+                            {}
+                        ).get(
+                            "missing",
+                            []
+                        )
                     )
 
-            else:
+            except Exception as error:
 
-                st.warning(
-                    "No readable text was extracted. "
-                    "This may be an image-only PDF. OCR is not "
-                    "included in this version."
+                st.error(
+                    f"CSV analysis error: {error}"
                 )
 
-        # --------------------------------------------------
-        # DTC AND FREEZE FRAME
-        # --------------------------------------------------
+    # -----------------------------------------------------
+    # SCAN REPORT PDF
+    # -----------------------------------------------------
 
-        st.subheader("8. DTC Information")
+    st.subheader("8. Upload Scanner PDF")
 
-        dtc_text = st.text_area(
-            "Diagnostic Trouble Codes (DTCs)",
-            height=120,
-            placeholder=(
-                "Example:\n"
-                "P0301 - Cylinder 1 Misfire\n"
-                "P0171 - System Too Lean\n"
-                "Include module name and status if available."
-            ),
-            key="dtc_information"
+    scanner_pdf = st.file_uploader(
+        "Upload scanner report PDF",
+        type=["pdf"],
+        key="scanner_pdf"
+    )
+
+    if scanner_pdf is not None:
+
+        uploaded_scan_text = extract_pdf_text(
+            scanner_pdf
         )
 
-        freeze_frame_text = st.text_area(
-            "Freeze Frame Data",
-            height=120,
-            placeholder=(
-                "RPM, coolant temperature, vehicle speed, "
-                "engine load, fuel trims and other available readings."
-            ),
-            key="freeze_frame_information"
-        )
-
-        # --------------------------------------------------
-        # PHYSICAL INSPECTION NOTES
-        # --------------------------------------------------
-
-        st.subheader("9. Physical Inspection Evidence")
-
-        physical_notes = st.text_area(
-            "Inspector Notes / Physical Test Readings",
-            height=150,
-            placeholder=(
-                "Example:\n"
-                "Battery voltage: 12.5V\n"
-                "Charging voltage: 14.2V\n"
-                "Coolant leak observed: No\n"
-                "Engine vibration: Present at idle\n"
-                "Test drive observations..."
-            ),
-            key="physical_inspection_notes"
-        )
-
-        # --------------------------------------------------
-        # PHOTO UPLOAD
-        # --------------------------------------------------
-
-        st.subheader("10. Photo Evidence")
-
-        image_files = st.file_uploader(
-            "Upload diagnostic photos",
-            type=["jpg", "jpeg", "png", "webp"],
-            accept_multiple_files=True,
-            key="diagnostic_photos"
-        )
-
-        if image_files:
-
-            st.caption(
-                f"{len(image_files)} photo(s) uploaded."
-            )
-
-            photo_columns = st.columns(4)
-
-            for index, photo in enumerate(image_files):
-
-                with photo_columns[index % 4]:
-
-                    photo.seek(0)
-
-                    st.image(
-                        photo,
-                        caption=photo.name,
-                        use_container_width=True
-                    )
-
-        # --------------------------------------------------
-        # VIDEO UPLOAD
-        # --------------------------------------------------
-
-        st.subheader("11. Optional Video Evidence")
-
-        video_files = st.file_uploader(
-            "Upload inspection videos for reference",
-            type=["mp4", "mov", "avi"],
-            accept_multiple_files=True,
-            key="diagnostic_videos"
-        )
-
-        if video_files:
-
-            st.info(
-                f"{len(video_files)} video(s) uploaded. "
-                "Video AI analysis is not implemented yet."
-            )
-
-        st.divider()
-
-        # --------------------------------------------------
-        # AI ANALYSIS
-        # --------------------------------------------------
-
-        st.subheader("12. AI Diagnostic Analysis")
-
-        st.warning(
-            "Verify the vehicle details, scanner data, DTCs "
-            "and physical inspection evidence before analysis."
-        )
-
-        if st.button(
-            "RUN AI DIAGNOSTIC ANALYSIS",
-            type="primary",
-            use_container_width=True
+        if uploaded_scan_text.startswith(
+            "PDF text extraction failed:"
         ):
 
+            st.warning(uploaded_scan_text)
+
+        elif uploaded_scan_text:
+
+            st.success(
+                "PDF text extracted successfully."
+            )
+
+            with st.expander("View extracted PDF text"):
+
+                st.text(uploaded_scan_text[:15000])
+
+            scan_text = (
+                scan_text
+                + "\n\n"
+                + uploaded_scan_text
+            )
+
+    # -----------------------------------------------------
+    # PHYSICAL FINDINGS
+    # -----------------------------------------------------
+
+    st.subheader("9. Physical Inspection Findings")
+
+    physical_notes = st.text_area(
+        "Physical Test Results",
+        height=150,
+        placeholder=(
+            "Enter measured values and physical observations. "
+            "Include test method, operating condition and results."
+        )
+    )
+
+    # -----------------------------------------------------
+    # IMAGES AND VIDEOS
+    # -----------------------------------------------------
+
+    st.subheader("10. Photos and Videos")
+
+    image_files = st.file_uploader(
+        "Upload diagnostic photos",
+        type=[
+            "jpg",
+            "jpeg",
+            "png",
+            "webp",
+        ],
+        accept_multiple_files=True,
+        key="diagnostic_images"
+    )
+
+    video_files = st.file_uploader(
+        "Upload reference videos",
+        type=[
+            "mp4",
+            "mov",
+            "avi",
+        ],
+        accept_multiple_files=True,
+        key="diagnostic_videos"
+    )
+
+    if video_files:
+
+        st.info(
+            "Videos are stored only as uploaded reference material "
+            "in this interface. This diagnostic engine does not "
+            "automatically analyze video content."
+        )
+
+    # -----------------------------------------------------
+    # RUN DIAGNOSIS
+    # -----------------------------------------------------
+
+    st.divider()
+
+    st.subheader("11. Run Diagnostic Analysis")
+
+    st.caption(
+        "Review all entered information before starting."
+    )
+
+    if st.button(
+        "Analyze Vehicle",
+        type="primary",
+        use_container_width=True
+    ):
+
+        if not make.strip() or not model.strip():
+
+            st.error(
+                "Please enter vehicle make and model."
+            )
+
+        elif not complaint.strip():
+
+            st.error(
+                "Please enter the customer complaint."
+            )
+
+        else:
+
             with st.spinner(
-                "AI is analyzing vehicle data and evidence..."
+                "Analyzing diagnostic evidence..."
             ):
 
                 try:
 
-                    # Reset file positions before sending images.
-                    if image_files:
-
-                        for photo in image_files:
-                            photo.seek(0)
-
-                    diagnosis = analyze_vehicle(
+                    result = analyze_vehicle(
                         vehicle=vehicle,
                         complaint=complaint,
                         answers=answers,
@@ -963,307 +895,353 @@ if page == "New Diagnosis":
                         freeze_frame_text=freeze_frame_text,
                         scan_text=scan_text,
                         physical_notes=physical_notes,
-                        image_files=image_files
+                        image_files=image_files,
                     )
 
-                    report_id = (
-                        "DC-"
-                        + datetime.now().strftime("%Y%m%d")
-                        + "-"
-                        + uuid.uuid4().hex[:6].upper()
-                    )
+                    st.session_state.diagnosis_result = result
 
-                    pdf_bytes = generate_pdf(
-                        vehicle=vehicle,
-                        customer_name=customer_name,
-                        complaint=complaint,
-                        diagnosis=diagnosis,
-                        report_id=report_id
-                    )
+                    st.session_state.csv_results = module_data
 
-                    save_inspection(
-                        report_id=report_id,
-                        customer_name=customer_name,
-                        customer_phone=customer_phone,
-                        vehicle=vehicle,
-                        complaint=complaint,
-                        diagnosis=diagnosis
-                    )
-
-                    st.session_state.diagnostic_result = diagnosis
-                    st.session_state.generated_pdf = pdf_bytes
-                    st.session_state.current_report_id = report_id
+                    st.session_state.report_id = make_report_id()
 
                     st.success(
-                        "AI analysis and PDF report generated successfully."
+                        "Diagnostic analysis completed."
                     )
 
                 except Exception as error:
 
                     st.error(
-                        f"Analysis failed: {error}"
+                        f"Diagnostic analysis failed: {error}"
                     )
 
-                    st.info(
-                        "Check API key, model settings, billing/quota, "
-                        "uploaded files and application logs."
-                    )
+    # -----------------------------------------------------
+    # DISPLAY DIAGNOSIS
+    # -----------------------------------------------------
 
-        # --------------------------------------------------
-        # DISPLAY RESULT
-        # --------------------------------------------------
+    result = st.session_state.diagnosis_result
 
-        if st.session_state.diagnostic_result:
+    if result:
 
-            st.divider()
+        st.divider()
 
-            st.subheader("13. Diagnostic Result")
+        st.header("Diagnostic Results")
 
-            st.markdown(
-                st.session_state.diagnostic_result
-            )
-
-        # --------------------------------------------------
-        # PDF DOWNLOAD
-        # --------------------------------------------------
-
-        if st.session_state.generated_pdf:
-
-            st.divider()
-
-            st.subheader("14. Doctor Car PDF Report")
-
-            st.success(
-                f"Report ID: {st.session_state.current_report_id}"
-            )
-
-            st.download_button(
-                label="Download Doctor Car PDF Report",
-                data=st.session_state.generated_pdf,
-                file_name=(
-                    f"{st.session_state.current_report_id}.pdf"
-                ),
-                mime="application/pdf",
-                use_container_width=True
-            )
-
-
-# ==================================================
-# INSPECTION HISTORY
-# ==================================================
-
-elif page == "Inspection History":
-
-    st.title("Inspection History")
-
-    try:
-
-        connection = get_connection()
-
-        history = pd.read_sql_query(
-            """
-            SELECT
-                report_id,
-                created_at,
-                customer_name,
-                customer_phone,
-                make,
-                model,
-                year,
-                vin,
-                mileage,
-                specification
-            FROM inspections
-            ORDER BY id DESC
-            """,
-            connection
+        st.write(
+            f"**Analysis Mode:** {result.get('analysis_mode')}"
         )
 
-        connection.close()
+        if result.get("ai_available"):
 
-        if history.empty:
-
-            st.info(
-                "No inspection records available yet."
+            st.success(
+                "AI-assisted analysis is available."
             )
 
         else:
 
-            st.dataframe(
-                history,
-                use_container_width=True,
-                hide_index=True
+            st.warning(
+                "AI analysis was unavailable. "
+                "Showing local rule-based analysis."
             )
 
-            selected_report = st.selectbox(
-                "Select Report ID",
-                history["report_id"].tolist()
-            )
+            if result.get("ai_error"):
 
-            if selected_report:
-
-                connection = get_connection()
-
-                selected_data = pd.read_sql_query(
-                    """
-                    SELECT *
-                    FROM inspections
-                    WHERE report_id = ?
-                    """,
-                    connection,
-                    params=(selected_report,)
+                st.caption(
+                    result.get("ai_error")
                 )
 
-                connection.close()
-
-                if not selected_data.empty:
-
-                    record = selected_data.iloc[0]
-
-                    st.subheader(
-                        f"Report: {selected_report}"
-                    )
-
-                    st.write(
-                        "**Date:**",
-                        record["created_at"]
-                    )
-
-                    st.write(
-                        "**Customer:**",
-                        record["customer_name"]
-                    )
-
-                    st.write(
-                        "**Phone:**",
-                        record["customer_phone"]
-                    )
-
-                    st.write(
-                        "**Vehicle:**",
-                        f"{record['make']} {record['model']} "
-                        f"{record['year']}"
-                    )
-
-                    st.write(
-                        "**VIN:**",
-                        record["vin"]
-                    )
-
-                    st.write(
-                        "**Mileage:**",
-                        record["mileage"]
-                    )
-
-                    st.write(
-                        "**Specification:**",
-                        record["specification"]
-                    )
-
-                    st.subheader("Customer Complaint")
-
-                    st.write(record["complaint"])
-
-                    st.subheader("Saved Diagnostic Result")
-
-                    st.markdown(record["diagnosis"])
-
-                    # Regenerate a PDF from saved diagnosis.
-                    if st.button(
-                        "Regenerate PDF for This Report",
-                        key="regenerate_history_pdf"
-                    ):
-
-                        try:
-
-                            saved_vehicle = {
-                                "make": record["make"],
-                                "model": record["model"],
-                                "year": record["year"],
-                                "vin": record["vin"],
-                                "mileage": record["mileage"],
-                                "specification": record["specification"]
-                            }
-
-                            history_pdf = generate_pdf(
-                                vehicle=saved_vehicle,
-                                customer_name=record["customer_name"],
-                                complaint=record["complaint"],
-                                diagnosis=record["diagnosis"],
-                                report_id=selected_report
-                            )
-
-                            st.download_button(
-                                label="Download Historical PDF",
-                                data=history_pdf,
-                                file_name=f"{selected_report}.pdf",
-                                mime="application/pdf",
-                                key="history_pdf_download"
-                            )
-
-                        except Exception as error:
-
-                            st.error(
-                                f"Could not regenerate PDF: {error}"
-                            )
-
-    except Exception as error:
-
-        st.error(
-            f"History error: {error}"
+        st.markdown(
+            result.get("diagnosis", "")
         )
 
+        # -------------------------------------------------
+        # CSV EVIDENCE
+        # -------------------------------------------------
 
-# ==================================================
-# SYSTEM INFORMATION
-# ==================================================
+        st.subheader("CSV Evidence Summary")
 
-elif page == "System Information":
+        for module_name, csv_result in (
+            result.get("evidence", {}).items()
+        ):
+
+            if module_name != "csv_data":
+                continue
+
+            st.text(
+                csv_result[:12000]
+            )
+
+        # -------------------------------------------------
+        # PHYSICAL TESTS
+        # -------------------------------------------------
+
+        st.subheader(
+            "Recommended Physical Tests"
+        )
+
+        for index, test in enumerate(
+            result.get(
+                "physical_test_recommendations",
+                []
+            ),
+            start=1
+        ):
+
+            st.write(
+                f"{index}. {test}"
+            )
+
+        # -------------------------------------------------
+        # PDF REPORT
+        # -------------------------------------------------
+
+        st.divider()
+
+        st.header("Generate Customer Report")
+
+        if st.button(
+            "Generate PDF Report",
+            type="primary"
+        ):
+
+            try:
+
+                report_id = (
+                    st.session_state.report_id
+                    or make_report_id()
+                )
+
+                pdf_result = generate_pdf(
+                    vehicle=vehicle_description(vehicle),
+                    customer_name=customer_name,
+                    complaint=complaint,
+                    diagnosis=result.get("diagnosis", ""),
+                    report_id=report_id,
+                    customer_phone=customer_phone,
+                )
+
+                pdf_bytes = normalize_pdf_output(
+                    pdf_result
+                )
+
+                if not pdf_bytes:
+
+                    st.error(
+                        "PDF generator did not return a valid PDF file."
+                    )
+
+                else:
+
+                    st.session_state.pdf_bytes = pdf_bytes
+
+                    st.session_state.report_id = report_id
+
+                    save_diagnosis(
+                        report_id=report_id,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        vehicle=vehicle,
+                        complaint=complaint,
+                        diagnosis=result.get(
+                            "diagnosis",
+                            ""
+                        ),
+                        analysis_mode=result.get(
+                            "analysis_mode",
+                            ""
+                        ),
+                    )
+
+                    st.success(
+                        "PDF report generated and diagnosis saved."
+                    )
+
+            except Exception as error:
+
+                st.error(
+                    f"PDF generation failed: {error}"
+                )
+
+        if st.session_state.pdf_bytes:
+
+            st.download_button(
+                label="Download Customer PDF Report",
+                data=st.session_state.pdf_bytes,
+                file_name=(
+                    f"{st.session_state.report_id}.pdf"
+                ),
+                mime="application/pdf",
+                type="primary",
+            )
+
+
+# =========================================================
+# 7. DIAGNOSIS HISTORY
+# =========================================================
+
+elif selected_page == "Diagnosis History":
+
+    st.title("Diagnosis History")
+
+    records = get_diagnosis_history()
+
+    if not records:
+
+        st.info(
+            "No saved diagnosis records found."
+        )
+
+    else:
+
+        st.caption(
+            f"{len(records)} recent records"
+        )
+
+        for record in records:
+
+            (
+                report_id,
+                created_at,
+                customer_name,
+                vehicle_json,
+                complaint,
+                analysis_mode,
+            ) = record
+
+            try:
+
+                vehicle_data = json.loads(
+                    vehicle_json
+                )
+
+                vehicle_name = vehicle_description(
+                    vehicle_data
+                )
+
+            except Exception:
+
+                vehicle_name = vehicle_json
+
+            with st.expander(
+                f"{report_id} | {vehicle_name}"
+            ):
+
+                st.write(
+                    f"**Date:** {created_at}"
+                )
+
+                st.write(
+                    f"**Customer:** {customer_name}"
+                )
+
+                st.write(
+                    f"**Complaint:** {complaint}"
+                )
+
+                st.write(
+                    f"**Analysis Mode:** {analysis_mode}"
+                )
+
+                if st.button(
+                    "View Saved Diagnosis",
+                    key=f"view_{report_id}"
+                ):
+
+                    saved = get_history_record(
+                        report_id
+                    )
+
+                    if saved:
+
+                        st.markdown(
+                            saved[7]
+                        )
+
+
+# =========================================================
+# 8. SYSTEM INFORMATION
+# =========================================================
+
+elif selected_page == "System Information":
 
     st.title("System Information")
 
-    st.markdown(
-        """
-        ### Doctor Car AI Diagnostic System
+    st.subheader("Doctor Car Diagnostic Platform")
 
-        **Current application features**
+    st.write(
+        "Evidence-based automotive diagnostic software."
+    )
 
-        - Vehicle and customer information
-        - Complaint-based diagnostic recommendations
-        - Recommended vehicle modules
-        - Recommended Live Data parameters
-        - Recommended confirmation tests
-        - AI-generated diagnostic questions
-        - THINKDIAG 2 CSV analysis
-        - Multiple vehicle module uploads
-        - Full scan PDF text extraction
-        - DTC and freeze-frame analysis
-        - Physical inspection notes
-        - Photo evidence analysis
-        - AI-assisted diagnostic findings
-        - PDF report generation
-        - Local inspection history
+    st.markdown("""
+    **Core Modules**
 
-        ### Important Limitations
+    - Parameter Database
+    - Smart Parameter Mapper
+    - CSV Analyzer
+    - Diagnostic Engine
+    - PDF Report Generator
+    - Diagnosis History
+    """)
 
-        1. This is a prototype, not a production-ready system.
-        2. Exact THINKDIAG 2 CSV compatibility must be tested with real exports.
-        3. Generic parameter recognition does not replace OEM specifications.
-        4. Scanned PDF OCR is not included.
-        5. Uploaded videos are not analyzed by AI.
-        6. SQLite storage is local and may not persist reliably on cloud hosting.
-        7. User login, inspector permissions and report approval are not implemented.
-        8. AI findings must be verified by a qualified inspector before repair decisions.
+    st.subheader("Diagnostic Evidence Principles")
 
-        ### Doctor Car
+    st.markdown("""
+    - DTC alone does not confirm component failure.
+    - Freeze-frame data must be preserved.
+    - Live-data values require correct units and conditions.
+    - Missing data is not zero or normal.
+    - Physical confirmation tests are important.
+    - OEM specifications must be verified.
+    """)
 
-        Professional Vehicle Diagnostics  
-        AI-Assisted Diagnostic Reports  
-        Mobile Inspection Service Across UAE
-        """
+    st.subheader("AI Configuration")
+
+    if os.getenv("OPENAI_API_KEY"):
+
+        st.success(
+            "OpenAI API environment variable detected."
+        )
+
+    else:
+
+        try:
+
+            import streamlit as st
+
+            if st.secrets.get(
+                "OPENAI_API_KEY",
+                ""
+            ):
+
+                st.success(
+                    "OpenAI API key detected in Streamlit secrets."
+                )
+
+            else:
+
+                st.warning(
+                    "OpenAI API key not detected. "
+                    "Rule-based analysis can still operate."
+                )
+
+        except Exception:
+
+            st.warning(
+                "OpenAI API key not detected. "
+                "Rule-based analysis can still operate."
+            )
+
+    st.caption(
+        "AI analysis is an assistant to the inspector. "
+        "Final diagnostic decisions require technical verification."
     )
 
 
-# ==================================================
-# END
-# ==================================================
+# =========================================================
+# 9. FOOTER
+# =========================================================
+
+st.divider()
+
+st.caption(
+    "Doctor Car | Professional Automotive Diagnostics | UAE"
+)
